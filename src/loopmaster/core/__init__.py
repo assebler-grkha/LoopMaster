@@ -1,14 +1,17 @@
 from loopmaster.core.context import Context
-from loopmaster.core.engine import LoopEngine
+from loopmaster.core.engine import LoopEngine, LoopRunResult
 from loopmaster.core.exceptions import (
     BudgetExceededError,
     CheckpointError,
     InterruptedError,
     LoopError,
+    ReplayError,
     StepError,
 )
+from loopmaster.core.replay import ReplayRunner, ReplaySession, ResponseRecorder
 from loopmaster.core.types import (
     Budget,
+    CheckpointData,
     ErrorPolicy,
     InterruptionProtection,
     Loop,
@@ -37,5 +40,11 @@ __all__ = [
     "CheckpointError",
     "BudgetExceededError",
     "InterruptedError",
+    "ReplayError",
     "LoopEngine",
+    "LoopRunResult",
+    "CheckpointData",
+    "ResponseRecorder",
+    "ReplaySession",
+    "ReplayRunner",
 ]
