@@ -112,7 +112,7 @@ def _loop_def_to_dict(loop_def, source_file: Path) -> dict:
     """Convert LoopDef to a serializable dict with full step info."""
     # Collect steps by running the body in collection mode
     from loopmaster.core.engine import _set_current_steps
-    from loopmaster.core.types import Context
+    from loopmaster.core.context import Context
 
     steps = []
     try:
