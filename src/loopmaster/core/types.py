@@ -161,7 +161,7 @@ class Step:
     model: str | None = None
     prompt: str | None = None
     input: Any = None
-    retry: int = 1
+    retry: int | None = None
     timeout: float | None = None
     on_error: ErrorPolicy | None = None
 
@@ -224,7 +224,7 @@ class Step:
             d["prompt"] = self.prompt
         if self.input is not None:
             d["input"] = self.input
-        if self.retry != 1:
+        if self.retry is not None:
             d["retry"] = self.retry
         if self.timeout is not None:
             d["timeout"] = self.timeout

@@ -28,7 +28,7 @@ def execute_step(
     Returns:
         StepResult with success/failure status.
     """
-    step_retries = max(step.retry, error_policy.retry)
+    step_retries = step.retry if step.retry is not None else error_policy.retry
     max_retries = step_retries if step_retries > 0 else 1
 
     for attempt in range(max_retries):
