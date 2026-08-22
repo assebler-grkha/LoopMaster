@@ -6,21 +6,22 @@ other agent-specific artifacts.
 """
 
 from loopmaster.agents.adapter import (
-    AgentAdapter,
-    AgentInfo,
-    AgentRegistry,
     ClaudeCodeAdapter,
+    CursorAdapter,
     CustomAdapter,
     OpenCodeAdapter,
 )
+from loopmaster.agents.base import AgentAdapter, AgentInfo
 from loopmaster.agents.config_manager import ConfigError, ConfigManager
 from loopmaster.agents.prompt_manager import PromptManager
+from loopmaster.agents.registry import AgentRegistry
 
 __all__ = [
     "AgentInfo",
     "AgentAdapter",
     "AgentRegistry",
     "ClaudeCodeAdapter",
+    "CursorAdapter",
     "ConfigError",
     "ConfigManager",
     "CustomAdapter",

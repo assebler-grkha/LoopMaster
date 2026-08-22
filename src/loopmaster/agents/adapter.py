@@ -1,79 +1,18 @@
-"""Agent adapter pattern for safe interaction with agent applications.
+"""Agent adapter implementations for specific agent applications.
 
-The adapter layer reads/writes agent config files, system prompts, and
-other agent-specific artifacts. It NEVER modifies files during execution —
-only snapshots, injects a temporary section via markers, and restores on
-completion.
+Provides concrete adapters for OpenCode, Claude Code, Cursor, and
+custom agent paths. Each adapter knows how to discover, read, write,
+and restore the configuration files for its specific agent.
 """
+
 from __future__ import annotations
 
-import abc
 import contextlib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .base import AgentAdapter, AgentInfo
 from .prompt_manager import PromptManager
-
-
-@dataclass
-class AgentInfo:
-    """Metadata about a discovered agent installation."""
-
-    agent_type: str
-    display_name: str
-    config_paths: list[Path]
-    prompt_paths: list[Path]
-    is_installed: bool = False
-
-
-class AgentAdapter(abc.ABC):
-    """Base class for agent-specific adapters.
-
-    Each concrete adapter knows how to discover, read, write, and restore
-    the configuration files for a specific agent application.
-    """
-
-    @abc.abstractmethod
-    def discover(self) -> AgentInfo:
-        """Discover if this agent is installed and where."""
-        ...
-
-    @abc.abstractmethod
-    def read_config(self) -> dict[str, Any]:
-        """Read agent configuration files."""
-        ...
-
-    @abc.abstractmethod
-    def read_system_prompt(self) -> str:
-        """Read the agent's system prompt."""
-        ...
-
-    @abc.abstractmethod
-    def write_config(self, config: dict[str, Any]) -> None:
-        """Write agent configuration (with safety checks)."""
-        ...
-
-    @abc.abstractmethod
-    def inject_loop_context(self, loop_context: str) -> None:
-        """Inject loop instructions into agent's system prompt."""
-        ...
-
-    @abc.abstractmethod
-    def validate_config(self) -> bool:
-        """Validate that agent config is in expected state."""
-        ...
-
-    @abc.abstractmethod
-    def restore_original(self) -> None:
-        """Restore all files to pre-modification state."""
-        ...
-
-    @property
-    @abc.abstractmethod
-    def config_files(self) -> list[Path]:
-        """All files that this adapter manages."""
-        ...
 
 
 class CustomAdapter(AgentAdapter):
@@ -84,9 +23,9 @@ class CustomAdapter(AgentAdapter):
         config_paths: list[str | Path],
         prompt_path: str | Path | None = None,
     ) -> None:
+        super().__init__()
         self._config_paths = [Path(p) for p in config_paths]
         self._prompt_path = Path(prompt_path) if prompt_path else None
-        self._snapshots: dict[Path, bytes] = {}
 
     def discover(self) -> AgentInfo:
         existing = [p for p in self._config_paths if p.exists()]
@@ -123,6 +62,7 @@ class CustomAdapter(AgentAdapter):
 
         for path_str, content in config.items():
             path = Path(path_str)
+            self.snapshot(path)
             if isinstance(content, dict):
                 path.write_text(json.dumps(content, indent=2), encoding="utf-8")
             else:
@@ -131,6 +71,7 @@ class CustomAdapter(AgentAdapter):
     def inject_loop_context(self, loop_context: str) -> None:
         if not self._prompt_path:
             return
+        self.snapshot(self._prompt_path)
         prompt = self.read_system_prompt()
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
@@ -190,7 +131,10 @@ class OpenCodeAdapter(AgentAdapter):
         import json
 
         configs: dict[str, Any] = {}
-        for path in [self.GLOBAL_CONFIG, self._project_root / "opencode.json"]:
+        for path in [
+            self.GLOBAL_CONFIG,
+            self._project_root / "opencode.json",
+        ]:
             if path.exists():
                 with contextlib.suppress(json.JSONDecodeError, OSError):
                     configs[str(path)] = json.loads(path.read_text(encoding="utf-8"))
@@ -335,32 +279,92 @@ class ClaudeCodeAdapter(AgentAdapter):
         return files
 
 
-class AgentRegistry:
-    """Auto-discovers installed agents and provides adapters."""
+class CursorAdapter(AgentAdapter):
+    """Adapter for Cursor agent."""
+
+    CONFIG_DIR = Path.home() / ".cursor"
+    SETTINGS_FILE = Path.home() / ".cursor" / "settings.json"
+    RULES_FILE = Path.home() / ".cursor" / "rules"
 
     def __init__(self, project_root: Path | None = None) -> None:
         self._project_root = project_root or Path.cwd()
-        self._adapters: dict[str, AgentAdapter] = {
-            "opencode": OpenCodeAdapter(self._project_root),
-            "claude-code": ClaudeCodeAdapter(self._project_root),
-        }
+        self._snapshots: dict[Path, bytes] = {}
 
-    def register(self, name: str, adapter: AgentAdapter) -> None:
-        self._adapters[name] = adapter
+    def discover(self) -> AgentInfo:
+        config_paths = []
+        prompt_paths = []
 
-    def discover_all(self) -> list[AgentInfo]:
-        results = []
-        for adapter in self._adapters.values():
-            info = adapter.discover()
-            if info.is_installed:
-                results.append(info)
-        return results
+        if self.SETTINGS_FILE.exists():
+            config_paths.append(self.SETTINGS_FILE)
 
-    def get_adapter(self, agent_type: str) -> AgentAdapter:
-        if agent_type not in self._adapters:
-            msg = f"Unknown agent type: {agent_type}. Available: {list(self._adapters.keys())}"
-            raise ValueError(msg)
-        return self._adapters[agent_type]
+        project_cursor = self._project_root / ".cursor"
+        if project_cursor.exists():
+            for f in project_cursor.glob("**/*.json"):
+                config_paths.append(f)
+            for f in project_cursor.glob("**/*.md"):
+                prompt_paths.append(f)
 
-    def get_all_adapters(self) -> dict[str, AgentAdapter]:
-        return dict(self._adapters)
+        if self.RULES_FILE.exists():
+            prompt_paths.append(self.RULES_FILE)
+
+        return AgentInfo(
+            agent_type="cursor",
+            display_name="Cursor",
+            config_paths=config_paths,
+            prompt_paths=prompt_paths,
+            is_installed=len(config_paths) > 0,
+        )
+
+    def read_config(self) -> dict[str, Any]:
+        import json
+
+        configs: dict[str, Any] = {}
+        if self.SETTINGS_FILE.exists():
+            with contextlib.suppress(json.JSONDecodeError, OSError):
+                configs[str(self.SETTINGS_FILE)] = json.loads(
+                    self.SETTINGS_FILE.read_text(encoding="utf-8")
+                )
+        return configs
+
+    def read_system_prompt(self) -> str:
+        if self.RULES_FILE.exists():
+            return self.RULES_FILE.read_text(encoding="utf-8")
+        cursor_dir = self._project_root / ".cursor"
+        if cursor_dir.exists():
+            for f in sorted(cursor_dir.glob("**/*.md"), reverse=True):
+                return f.read_text(encoding="utf-8")
+        return ""
+
+    def write_config(self, config: dict[str, Any]) -> None:
+        import json
+
+        for path_str, content in config.items():
+            path = Path(path_str)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, dict):
+                path.write_text(json.dumps(content, indent=2), encoding="utf-8")
+            else:
+                path.write_text(str(content), encoding="utf-8")
+
+    def inject_loop_context(self, loop_context: str) -> None:
+        rules_file = self.RULES_FILE
+        rules_file.parent.mkdir(parents=True, exist_ok=True)
+        prompt = rules_file.read_text(encoding="utf-8") if rules_file.exists() else ""
+        pm = PromptManager()
+        updated = pm.inject(prompt, loop_context)
+        rules_file.write_text(updated, encoding="utf-8")
+
+    def validate_config(self) -> bool:
+        return self.SETTINGS_FILE.exists() or (self._project_root / ".cursor").exists()
+
+    def restore_original(self) -> None:
+        for path, content in self._snapshots.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    @property
+    def config_files(self) -> list[Path]:
+        files = []
+        if self.SETTINGS_FILE.exists():
+            files.append(self.SETTINGS_FILE)
+        return files

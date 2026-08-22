@@ -3,6 +3,7 @@
 MCP = thin transport (request-response).
 Loop Protocol = own contract for lifecycle.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,19 +15,9 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from loopmaster.events import LoopEvent
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class LoopEvent:
-    """Event emitted during loop execution."""
-
-    job_id: str
-    event_type: str
-    timestamp: float
-    step_index: int = 0
-    metrics_snapshot: dict[str, Any] = field(default_factory=dict)
-    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -43,7 +34,12 @@ class LoopJob:
 
 
 class LoopProtocol:
-    """Loop lifecycle protocol — independent of MCP transport."""
+    """Loop lifecycle protocol — independent of MCP transport.
+
+    Manages loop jobs, event subscriptions, and lifecycle operations
+    (start, pause, resume, cancel). Can be wrapped by MCPServer or used
+    directly.
+    """
 
     def __init__(self) -> None:
         self._jobs: dict[str, LoopJob] = {}
@@ -55,12 +51,14 @@ class LoopProtocol:
         loops = []
         for _name, engine in self._engines.items():
             for loop_name, loop_def in engine._registry.items():
-                loops.append({
-                    "name": loop_name,
-                    "version": loop_def.version,
-                    "agent": loop_def.agent,
-                    "has_budget": loop_def.budget is not None,
-                })
+                loops.append(
+                    {
+                        "name": loop_name,
+                        "version": loop_def.version,
+                        "agent": loop_def.agent,
+                        "has_budget": loop_def.budget is not None,
+                    }
+                )
         return loops
 
     def start_loop(
@@ -70,14 +68,10 @@ class LoopProtocol:
     ) -> str:
         """Start a loop execution. Returns job_id."""
         job_id = uuid.uuid4().hex[:8]
-        job = LoopJob(
-            job_id=job_id, loop_name=loop_name, status="running"
-        )
+        job = LoopJob(job_id=job_id, loop_name=loop_name, status="running")
         self._jobs[job_id] = job
         self._event_queues[job_id] = []
-        self._emit_event(
-            job_id, "loop_started", payload={"loop_name": loop_name}
-        )
+        self._emit_event(job_id, "loop_started", payload={"loop_name": loop_name})
         return job_id
 
     def get_status(self, job_id: str) -> dict[str, Any] | None:
@@ -121,9 +115,7 @@ class LoopProtocol:
         self._emit_event(job_id, "loop_cancelled")
         return True
 
-    async def subscribe_events(
-        self, job_id: str
-    ) -> AsyncIterator[LoopEvent]:
+    async def subscribe_events(self, job_id: str) -> AsyncIterator[LoopEvent]:
         """Subscribe to real-time events for a job."""
         queue: asyncio.Queue[LoopEvent] = asyncio.Queue()
         if job_id in self._event_queues:
@@ -131,19 +123,13 @@ class LoopProtocol:
         try:
             while True:
                 try:
-                    event = await asyncio.wait_for(
-                        queue.get(), timeout=1.0
-                    )
+                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
                     yield event
-                    if event.event_type in (
-                        "completed", "failed", "cancelled"
-                    ):
+                    if event.event_type in ("completed", "failed", "cancelled"):
                         break
                 except TimeoutError:
                     job = self._jobs.get(job_id)
-                    if job and job.status in (
-                        "completed", "failed", "cancelled"
-                    ):
+                    if job and job.status in ("completed", "failed", "cancelled"):
                         break
         finally:
             if job_id in self._event_queues:
@@ -270,28 +256,36 @@ class MCPServer:
             },
         ]
 
-    async def handle_tool_call(
-        self, tool_name: str, arguments: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def handle_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle an MCP tool call."""
-        if tool_name == "list_loops":
-            return {"loops": self.protocol.list_loops()}
-        if tool_name == "start_loop":
-            job_id = self.protocol.start_loop(
-                loop_name=arguments["loop_name"],
-                initial_context=arguments.get("initial_context"),
-            )
-            return {"job_id": job_id}
-        if tool_name == "get_status":
-            status = self.protocol.get_status(arguments["job_id"])
-            return status or {"error": "Job not found"}
-        if tool_name == "pause_loop":
-            success = self.protocol.pause_loop(arguments["job_id"])
-            return {"success": success}
-        if tool_name == "resume_loop":
-            success = self.protocol.resume_loop(arguments["job_id"])
-            return {"success": success}
-        if tool_name == "cancel_loop":
-            success = self.protocol.cancel_loop(arguments["job_id"])
-            return {"success": success}
+        handlers = {
+            "list_loops": self._handle_list_loops,
+            "start_loop": self._handle_start_loop,
+            "get_status": self._handle_get_status,
+            "pause_loop": self._handle_simple_loop_op,
+            "resume_loop": self._handle_simple_loop_op,
+            "cancel_loop": self._handle_simple_loop_op,
+        }
+        handler = handlers.get(tool_name)
+        if handler:
+            return handler(tool_name, arguments)
         return {"error": f"Unknown tool: {tool_name}"}
+
+    def _handle_list_loops(self, _tool: str, _args: dict[str, Any]) -> dict[str, Any]:
+        return {"loops": self.protocol.list_loops()}
+
+    def _handle_start_loop(self, _tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        job_id = self.protocol.start_loop(
+            loop_name=args["loop_name"],
+            initial_context=args.get("initial_context"),
+        )
+        return {"job_id": job_id}
+
+    def _handle_get_status(self, _tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        status = self.protocol.get_status(args["job_id"])
+        return status or {"error": "Job not found"}
+
+    def _handle_simple_loop_op(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        method = getattr(self.protocol, tool)
+        success = method(args["job_id"])
+        return {"success": success}

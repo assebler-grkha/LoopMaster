@@ -8,9 +8,7 @@ class LoopError(Exception):
 class StepError(LoopError):
     """Raised when a step fails."""
 
-    def __init__(
-        self, step_name: str, reason: str, cause: Exception | None = None
-    ):
+    def __init__(self, step_name: str, reason: str, cause: Exception | None = None):
         self.step_name = step_name
         self.reason = reason
         self.cause = cause
@@ -27,9 +25,7 @@ class BudgetExceededError(LoopError):
     def __init__(self, budget_limit: float, spent: float):
         self.budget_limit = budget_limit
         self.spent = spent
-        super().__init__(
-            f"Budget exceeded: ${spent:.4f} / ${budget_limit:.4f}"
-        )
+        super().__init__(f"Budget exceeded: ${spent:.4f} / ${budget_limit:.4f}")
 
 
 class InterruptedError(LoopError):
@@ -38,7 +34,3 @@ class InterruptedError(LoopError):
 
 class ReplayError(LoopError):
     """Raised when deterministic replay fails."""
-
-
-class ExportError(LoopError):
-    """Raised when export fails."""

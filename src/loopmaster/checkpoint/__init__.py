@@ -1,4 +1,5 @@
 """Checkpoint manager — save/load checkpoints to/from disk."""
+
 from __future__ import annotations
 
 import hashlib
@@ -62,13 +63,15 @@ class CheckpointManager:
                 continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
-                checkpoints.append({
-                    "path": str(f),
-                    "loop_name": data.get("loop_name", "unknown"),
-                    "loop_version": data.get("loop_version", "unknown"),
-                    "step_index": data.get("step_index", 0),
-                    "executed_step_names": data.get("executed_step_names", []),
-                })
+                checkpoints.append(
+                    {
+                        "path": str(f),
+                        "loop_name": data.get("loop_name", "unknown"),
+                        "loop_version": data.get("loop_version", "unknown"),
+                        "step_index": data.get("step_index", 0),
+                        "executed_step_names": data.get("executed_step_names", []),
+                    }
+                )
             except (json.JSONDecodeError, KeyError):
                 continue
         return checkpoints

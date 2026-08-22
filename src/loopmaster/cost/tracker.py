@@ -10,7 +10,17 @@ from typing import Any
 
 @dataclass
 class CostRecord:
-    """A single cost record."""
+    """A single cost record for an LLM API call.
+
+    Attributes:
+        model: Model name used for the call.
+        input_tokens: Number of input tokens consumed.
+        output_tokens: Number of output tokens generated.
+        cost: Computed cost in dollars.
+        timestamp: Unix timestamp of the call.
+        step_name: Name of the step that triggered the call.
+        metadata: Additional call metadata.
+    """
 
     model: str
     input_tokens: int
@@ -79,24 +89,29 @@ class CostTracker:
 
     @property
     def total_cost(self) -> float:
+        """Total cost across all recorded calls."""
         return sum(r.cost for r in self._records)
 
     @property
     def total_input_tokens(self) -> int:
+        """Total input tokens across all recorded calls."""
         return sum(r.input_tokens for r in self._records)
 
     @property
     def total_output_tokens(self) -> int:
+        """Total output tokens across all recorded calls."""
         return sum(r.output_tokens for r in self._records)
 
     @property
     def is_over_budget(self) -> bool:
+        """Whether the budget limit has been exceeded."""
         if self._budget_limit is None:
             return False
         return self.total_cost > self._budget_limit
 
     @property
     def remaining_budget(self) -> float | None:
+        """Remaining budget in dollars, or None if no limit set."""
         if self._budget_limit is None:
             return None
         return max(0.0, self._budget_limit - self.total_cost)

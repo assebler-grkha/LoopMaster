@@ -4,6 +4,7 @@ Records all LLM/tool responses during a run. On replay, injects
 recorded responses instead of making real API calls. Enables debugging
 without burning API credits.
 """
+
 from __future__ import annotations
 
 import json
@@ -55,7 +56,14 @@ class ReplaySession:
     def load(cls, path: Path) -> ReplaySession:
         """Load recording from disk."""
         data = json.loads(path.read_text(encoding="utf-8"))
-        return cls(**data)
+        raw_steps = data.pop("recorded_steps", [])
+        steps = []
+        for s in raw_steps:
+            if isinstance(s, RecordedStep):
+                steps.append(s)
+            else:
+                steps.append(RecordedStep(**s))
+        return cls(recorded_steps=steps, **data)
 
 
 class ResponseRecorder:
@@ -80,6 +88,7 @@ class ResponseRecorder:
         )
 
     def set_initial_context(self, ctx_data: dict[str, Any]) -> None:
+        """Set the initial context for the recording session."""
         self._session.initial_context = ctx_data
 
     def record_step(
@@ -90,6 +99,7 @@ class ResponseRecorder:
         model: str | None = None,
         tool: str | None = None,
     ) -> None:
+        """Record a step execution with its input and result."""
         self._session.recorded_steps.append(
             RecordedStep(
                 step_name=step_name,
@@ -105,13 +115,16 @@ class ResponseRecorder:
         )
 
     def set_final_context(self, ctx_data: dict[str, Any]) -> None:
+        """Set the final context after loop completion."""
         self._session.final_context = ctx_data
 
     @property
     def session(self) -> ReplaySession:
+        """The recorded replay session."""
         return self._session
 
     def save(self, path: Path) -> None:
+        """Save the recording to disk as JSON."""
         self._session.save(path)
 
 
@@ -168,7 +181,9 @@ class ReplayRunner:
         )
 
     def get_all_recorded_steps(self) -> list[RecordedStep]:
+        """Return all recorded steps in execution order."""
         return list(self._session.recorded_steps)
 
     def has_recording(self, step_name: str) -> bool:
+        """Check whether a recording exists for the given step name."""
         return step_name in self._results_by_name

@@ -40,4 +40,7 @@ __all__ = [
     "BudgetExceededError",
     "InterruptedError",
     "LoopEngine",
+    "LoopEvent",
 ]
+
+from loopmaster.events import LoopEvent  # noqa: E402

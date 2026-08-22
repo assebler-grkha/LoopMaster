@@ -20,6 +20,10 @@ class RecoveryAction(Enum):
     RETRY = "retry"
     FALLBACK = "fallback"
 
+    def to_dict(self) -> str:
+        """Serialize to string for YAML export."""
+        return self.value
+
 
 @dataclass
 class ErrorPolicy:
@@ -38,6 +42,15 @@ class ErrorPolicy:
             return RecoveryAction.SKIP
         return self.on_failure
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        d: dict[str, Any] = {"retry": self.retry, "backoff": self.backoff}
+        if self.on_failure != RecoveryAction.ABORT:
+            d["on_failure"] = self.on_failure.value
+        if self.fallback_model:
+            d["fallback_model"] = self.fallback_model
+        return d
+
 
 @dataclass
 class Budget:
@@ -54,6 +67,17 @@ class Budget:
             return cls(max_cost=float(value[1:]))
         return cls(max_cost=float(value))
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        d: dict[str, Any] = {}
+        if self.max_cost is not None:
+            d["max_cost"] = self.max_cost
+        if self.max_tokens is not None:
+            d["max_tokens"] = self.max_tokens
+        if self.max_steps is not None:
+            d["max_steps"] = self.max_steps
+        return d
+
 
 @dataclass
 class InterruptionProtection:
@@ -66,6 +90,25 @@ class InterruptionProtection:
     post_step_checkpoint: bool = True
     context_overflow_strategy: str = "compress_and_resume"
     max_resume_attempts: int = 3
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        d: dict[str, Any] = {}
+        if self.enabled:
+            d["enabled"] = True
+        if self.heartbeat_interval != 30.0:
+            d["heartbeat_interval"] = self.heartbeat_interval
+        if self.heartbeat_timeout != 60.0:
+            d["heartbeat_timeout"] = self.heartbeat_timeout
+        if not self.pre_step_checkpoint:
+            d["pre_step_checkpoint"] = False
+        if not self.post_step_checkpoint:
+            d["post_step_checkpoint"] = False
+        if self.context_overflow_strategy != "compress_and_resume":
+            d["context_overflow_strategy"] = self.context_overflow_strategy
+        if self.max_resume_attempts != 3:
+            d["max_resume_attempts"] = self.max_resume_attempts
+        return d
 
 
 @dataclass
@@ -123,9 +166,14 @@ class Step:
     on_error: ErrorPolicy | None = None
 
     _result: StepResult | None = field(default=None, repr=False)
-    _engine_callback: Callable[..., Any] | None = field(
-        default=None, repr=False
-    )
+    _engine_callback: Callable[..., Any] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        from .engine import _get_current_steps
+
+        steps = _get_current_steps()
+        if steps is not None:
+            steps.append(self)
 
     def execute(self, ctx_data: dict[str, Any]) -> StepResult:
         """Execute the step. Called by the engine runtime."""
@@ -138,10 +186,14 @@ class Step:
             else:
                 output = self._execute_default(ctx_data)
             duration = (time.monotonic() - start) * 1000
+            tokens = getattr(output, "_tokens", 0)
+            cost = getattr(output, "_cost", 0.0)
             result = StepResult(
                 step_name=self.name,
                 success=True,
                 output=output,
+                tokens_used=tokens,
+                cost=cost,
                 duration_ms=duration,
             )
         except Exception as exc:
@@ -161,6 +213,25 @@ class Step:
             return self.prompt.format(**ctx_data)
         return self.input
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        d: dict[str, Any] = {"name": self.name}
+        if self.tool:
+            d["tool"] = self.tool
+        if self.model:
+            d["model"] = self.model
+        if self.prompt:
+            d["prompt"] = self.prompt
+        if self.input is not None:
+            d["input"] = self.input
+        if self.retry != 1:
+            d["retry"] = self.retry
+        if self.timeout is not None:
+            d["timeout"] = self.timeout
+        if self.on_error:
+            d["on_error"] = self.on_error.to_dict()
+        return d
+
 
 @dataclass
 class Parallel:
@@ -170,6 +241,10 @@ class Parallel:
 
     def __init__(self, *steps: Step):
         self.steps = list(steps)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        return {"parallel": [s.to_dict() for s in self.steps]}
 
 
 def _get_source_hash(func: Callable[..., Any]) -> str:
@@ -197,9 +272,7 @@ class CheckpointData:
 
     def __post_init__(self) -> None:
         if not self.created_at:
-            self.created_at = (
-                datetime.datetime.now(datetime.UTC).isoformat()
-            )
+            self.created_at = datetime.datetime.now(datetime.UTC).isoformat()
 
 
 @dataclass
@@ -217,6 +290,23 @@ class LoopDef:
     def __post_init__(self) -> None:
         if not self.source_hash:
             self.source_hash = _get_source_hash(self.body)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        d: dict[str, Any] = {"name": self.name, "version": self.version}
+        if self.agent:
+            d["agent"] = self.agent
+        if self.budget:
+            b = self.budget.to_dict()
+            if b:
+                d["budget"] = b
+        if self.interruption_protection:
+            ip = self.interruption_protection.to_dict()
+            if ip:
+                d["interruption_protection"] = ip
+        if self.source_hash:
+            d["source_hash"] = self.source_hash
+        return d
 
 
 def Loop(  # noqa: N802

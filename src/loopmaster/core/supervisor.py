@@ -15,7 +15,13 @@ from loopmaster.core.types import Step, StepResult
 
 @dataclass
 class SupervisorResult:
-    """Result of running parallel steps under the supervisor."""
+    """Result of running parallel steps under the supervisor.
+
+    Attributes:
+        results: Mapping of step name to its execution result.
+        all_succeeded: True if every step completed successfully.
+        errors: List of error messages for failed steps.
+    """
 
     results: dict[str, StepResult] = field(default_factory=dict)
     all_succeeded: bool = True

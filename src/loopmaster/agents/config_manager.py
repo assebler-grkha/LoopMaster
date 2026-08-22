@@ -6,6 +6,7 @@ Safety guarantees:
 3. Rollback on failure: any error restores original state
 4. Dry-run preview: show diff before applying
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,15 @@ class ConfigError(Exception):
 
 
 class ConfigManager:
-    """Safe config modification with snapshot and rollback."""
+    """Safe config modification with snapshot and rollback.
+
+    Usage:
+        adapter = OpenCodeAdapter()
+        mgr = ConfigManager(adapter)
+        mgr.snapshot_all()
+        # ... make changes ...
+        # On error, mgr.rollback() restores everything.
+    """
 
     def __init__(self, adapter: AgentAdapter) -> None:
         self.adapter = adapter
@@ -28,7 +37,10 @@ class ConfigManager:
         self._modified_files: list[Path] = []
 
     def snapshot_all(self) -> dict[Path, bytes]:
-        """Snapshot ALL agent files before any change."""
+        """Snapshot ALL agent files before any change.
+
+        Returns a copy of the snapshot map for inspection.
+        """
         self._snapshots.clear()
         for file_path in self.adapter.config_files:
             if file_path.exists():
@@ -85,13 +97,10 @@ class ConfigManager:
                 if current != original:
                     dec = "utf-8"
                     err = "replace"
-                    orig_lines = original.decode(
-                        dec, errors=err
-                    ).splitlines(keepends=True)
-                    curr_lines = current.decode(
-                        dec, errors=err
-                    ).splitlines(keepends=True)
+                    orig_lines = original.decode(dec, errors=err).splitlines(keepends=True)
+                    curr_lines = current.decode(dec, errors=err).splitlines(keepends=True)
                     import difflib
+
                     diff = difflib.unified_diff(
                         orig_lines,
                         curr_lines,

@@ -36,17 +36,21 @@ class LoopMetrics:
 
     @property
     def duration_ms(self) -> float:
+        """Total loop duration in milliseconds."""
         return (self.end_time - self.start_time) * 1000
 
     @property
     def cost_per_step(self) -> float:
+        """Average cost per step."""
         return self.total_cost / max(self.steps_executed, 1)
 
     @property
     def tokens_per_step(self) -> float:
+        """Average tokens per step."""
         return self.total_tokens / max(self.steps_executed, 1)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize metrics to a dictionary."""
         return {
             "loop_name": self.loop_name,
             "total_cost": self.total_cost,
