@@ -20,7 +20,7 @@ from typing import Any
 from ..cost.tracker import CostTracker
 from ..metrics.collector import MetricsCollector
 from .context import Context
-from .exceptions import BudgetExceededError, InterruptedError
+from .exceptions import BudgetExceededError, InterruptedError, LoopError
 from .heartbeat import (
     HeartbeatState,
     is_interrupted,
@@ -342,6 +342,8 @@ class LoopEngine:
                     self._make_checkpoint(loop_def, ctx, executed_steps, results)
 
         except (BudgetExceededError, InterruptedError):
+            raise
+        except LoopError:
             raise
         except Exception as exc:
             interrupted = True

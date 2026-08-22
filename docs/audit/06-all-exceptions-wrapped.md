@@ -3,7 +3,8 @@
 **Severity:** P1 — High  
 **File:** `core/engine.py`  
 **Lines:** 373-376  
-**Tags:** error-handling, debugging
+**Tags:** error-handling, debugging  
+**Status:** FIXED (commit 82ce811)
 
 ## Problem
 
