@@ -61,7 +61,7 @@ class LoopRunResult:
     total_cost: float
     total_tokens: int
     steps_executed: list[str]
-    error: Exception | None = None
+    error: str | None = None
     checkpoint_saved: bool = False
     interrupted: bool = False
     resume_count: int = 0
@@ -354,12 +354,20 @@ class LoopEngine:
 
         all_succeeded = all(r.success for r in results.values())
 
+        first_error: str | None = None
+        if not all_succeeded:
+            for r in results.values():
+                if not r.success and r.error is not None:
+                    first_error = r.error
+                    break
+
         return LoopRunResult(
             success=all_succeeded,
             results=results,
             total_cost=total_cost,
             total_tokens=total_tokens,
             steps_executed=executed_steps,
+            error=first_error,
             interrupted=interrupted,
             resume_count=self._resume_count,
             last_checkpoint=self._last_checkpoint,

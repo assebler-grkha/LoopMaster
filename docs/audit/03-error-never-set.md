@@ -1,6 +1,7 @@
 # Audit: LoopRunResult.error never set — CLI always shows success
 
 **Severity:** P0 — Critical  
+**Status:** FIXED ✅
 **File:** `core/engine.py`, `cli/app.py`  
 **Lines:** engine.py:58, engine.py:373-376; cli/app.py:189  
 **Tags:** usability, error-handling
