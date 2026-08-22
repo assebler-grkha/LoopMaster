@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,16 +37,16 @@ class AgentAdapter(abc.ABC):
     the configuration files for a specific agent application.
     """
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-
     def __init__(self) -> None:
         self._snapshots: dict[Path, bytes] = {}
 
     def snapshot(self, path: Path) -> None:
         """Snapshot file content before modification. Idempotent per path."""
         if path not in self._snapshots and path.exists():
-            self._snapshots[path] = path.read_bytes()
+            try:
+                self._snapshots[path] = path.read_bytes()
+            except OSError as exc:
+                logger.warning("Could not snapshot %s: %s", path, exc)
 
     @abc.abstractmethod
     def discover(self) -> AgentInfo:

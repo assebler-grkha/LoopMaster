@@ -3,7 +3,8 @@
 **Severity:** P0 — Critical  
 **File:** `agents/adapter.py`  
 **Lines:** 98, 173, 227-239, 244-247, 268  
-**Tags:** data-loss, correctness
+**Tags:** data-loss, correctness  
+**Status:** FIXED
 
 ## Problem
 

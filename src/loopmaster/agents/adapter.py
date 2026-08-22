@@ -63,6 +63,7 @@ class CustomAdapter(AgentAdapter):
         for path_str, content in config.items():
             path = Path(path_str)
             self.snapshot(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(content, dict):
                 path.write_text(json.dumps(content, indent=2), encoding="utf-8")
             else:
@@ -71,6 +72,7 @@ class CustomAdapter(AgentAdapter):
     def inject_loop_context(self, loop_context: str) -> None:
         if not self._prompt_path:
             return
+        self._prompt_path.parent.mkdir(parents=True, exist_ok=True)
         self.snapshot(self._prompt_path)
         prompt = self.read_system_prompt()
         pm = PromptManager()
@@ -101,8 +103,8 @@ class OpenCodeAdapter(AgentAdapter):
     PROJECT_CONFIG = Path("opencode.json")
 
     def __init__(self, project_root: Path | None = None) -> None:
+        super().__init__()
         self._project_root = project_root or Path.cwd()
-        self._snapshots: dict[Path, bytes] = {}
 
     def discover(self) -> AgentInfo:
         config_paths = []
@@ -153,6 +155,7 @@ class OpenCodeAdapter(AgentAdapter):
 
         for path_str, content in config.items():
             path = Path(path_str)
+            self.snapshot(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(content, dict):
                 path.write_text(json.dumps(content, indent=2), encoding="utf-8")
@@ -168,6 +171,7 @@ class OpenCodeAdapter(AgentAdapter):
             prompts = sorted(agent_dir.glob("*.md"))
             prompt_file = prompts[-1] if prompts else agent_dir / "loop-instructions.md"
 
+        self.snapshot(prompt_file)
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
@@ -199,8 +203,8 @@ class ClaudeCodeAdapter(AgentAdapter):
     SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
     def __init__(self, project_root: Path | None = None) -> None:
+        super().__init__()
         self._project_root = project_root or Path.cwd()
-        self._snapshots: dict[Path, bytes] = {}
 
     def discover(self) -> AgentInfo:
         config_paths = []
@@ -247,6 +251,7 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         for path_str, content in config.items():
             path = Path(path_str)
+            self.snapshot(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(content, dict):
                 path.write_text(json.dumps(content, indent=2), encoding="utf-8")
@@ -258,6 +263,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         claude_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = claude_dir / "CLAUDE.md"
 
+        self.snapshot(prompt_file)
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
@@ -287,8 +293,8 @@ class CursorAdapter(AgentAdapter):
     RULES_FILE = Path.home() / ".cursor" / "rules"
 
     def __init__(self, project_root: Path | None = None) -> None:
+        super().__init__()
         self._project_root = project_root or Path.cwd()
-        self._snapshots: dict[Path, bytes] = {}
 
     def discover(self) -> AgentInfo:
         config_paths = []
@@ -340,6 +346,7 @@ class CursorAdapter(AgentAdapter):
 
         for path_str, content in config.items():
             path = Path(path_str)
+            self.snapshot(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(content, dict):
                 path.write_text(json.dumps(content, indent=2), encoding="utf-8")
@@ -349,6 +356,7 @@ class CursorAdapter(AgentAdapter):
     def inject_loop_context(self, loop_context: str) -> None:
         rules_file = self.RULES_FILE
         rules_file.parent.mkdir(parents=True, exist_ok=True)
+        self.snapshot(rules_file)
         prompt = rules_file.read_text(encoding="utf-8") if rules_file.exists() else ""
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
