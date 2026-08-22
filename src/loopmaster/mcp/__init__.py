@@ -17,7 +17,19 @@ from typing import Any
 
 from loopmaster.events import LoopEvent
 
+from .job_store import JobData, JobStore, get_job_store
+
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "LoopEvent",
+    "LoopJob",
+    "LoopProtocol",
+    "MCPServer",
+    "JobData",
+    "JobStore",
+    "get_job_store",
+]
 
 
 @dataclass

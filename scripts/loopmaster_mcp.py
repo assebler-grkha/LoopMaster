@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""LoopMaster MCP Server — loop definitions and execution engine.
+"""LoopMaster MCP Server — loop definitions and persistent execution engine.
 
 Provides MCP tools to:
   1. loop_list  → discover available @Loop files
-  2. loop_get   → returns full loop definition (steps, prompts, context)
-  3. loop_result → report step outcomes (for agent-as-executor model)
-  4. loop_status → check overall progress
+  2. loop_get   → returns full loop definition (steps, prompts, context) & registers job
+  3. loop_result → report step outcomes (persisted to SQLite)
+  4. loop_status → check overall progress from SQLite
   5. loop_cancel → cancel a running loop
   6. loop_run    → execute a loop end-to-end via LoopEngine with multi-provider LLM API
 
@@ -18,8 +18,8 @@ import importlib.util
 import json
 import logging
 import os
-import threading
 import time
+import uuid
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -29,6 +29,7 @@ from loopmaster.core.types import ErrorPolicy
 from loopmaster.core.types import LoopDef as LoopDefType
 from loopmaster.cost.tracker import CostTracker
 from loopmaster.llm import LLMClient, get_llm_config
+from loopmaster.mcp.job_store import get_job_store
 from loopmaster.metrics.collector import MetricsCollector
 
 logging.basicConfig(level=logging.INFO)
@@ -43,10 +44,10 @@ mcp = FastMCP(
     ),
 )
 
-# ── In-memory job tracking ──────────────────────────────────────────────────
+# ── Persistent Job Storage ──────────────────────────────────────────────────
 
-_jobs: dict[str, dict] = {}
-_jobs_lock = threading.Lock()
+_store = get_job_store()
+_store.mark_interrupted_jobs_on_startup()
 
 # ── Loop discovery ───────────────────────────────────────────────────────────
 
@@ -212,16 +213,14 @@ def loop_get(loop_name: str, search_dir: str | None = None) -> str:
     for f in files:
         info = _load_loop_def(f)
         if info and info["name"] == loop_name:
-            job_id = f"{loop_name}_{int(time.time())}"
-            with _jobs_lock:
-                _jobs[job_id] = {
-                    "loop_name": loop_name,
-                    "definition": info,
-                    "status": "ready",
-                    "current_step": 0,
-                    "results": {},
-                    "started_at": time.time(),
-                }
+            job_id = f"{loop_name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            _store.create_job(
+                job_id=job_id,
+                loop_name=loop_name,
+                definition=info,
+                status="ready",
+                total_steps=info["step_count"],
+            )
             return json.dumps(
                 {
                     "job_id": job_id,
@@ -251,7 +250,8 @@ def loop_result(
 ) -> str:
     """Report the result of executing a step.
 
-    Called by OpenCode after executing each step of a loop.
+    Called by OpenCode after executing each step of a loop. Results are persisted
+    atomically to SQLite.
 
     Args:
         job_id: The job ID from loop_get.
@@ -260,99 +260,92 @@ def loop_result(
         output: The step output (if success=True).
         error: The error message (if success=False).
     """
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if not job:
-            return f"Error: Job '{job_id}' not found."
+    job = _store.record_step_result(
+        job_id=job_id,
+        step_name=step_name,
+        success=success,
+        output=output,
+        error=error,
+    )
+    if not job:
+        return f"Error: Job '{job_id}' not found."
 
-        job["results"][step_name] = {
-            "success": success,
-            "output": output,
-            "error": error,
-            "timestamp": time.time(),
-        }
-        job["current_step"] += 1
+    total = job.total_steps
+    done = len(job.results)
+    failed = sum(1 for r in job.results.values() if not r["success"])
 
-        total = job["definition"]["step_count"]
-        done = len(job["results"])
-        failed = sum(1 for r in job["results"].values() if not r["success"])
-
-        if failed > 0:
-            policy = _get_error_policy(job["definition"], step_name)
-            job["status"] = "error"
-            return json.dumps(
-                {
-                    "status": "error",
-                    "step": step_name,
-                    "progress": f"{done}/{total}",
-                    "error": error,
-                    "suggestion": _get_recovery_suggestion(policy, error),
-                },
-                indent=2,
-            )
-
-        if done >= total:
-            job["status"] = "completed"
-            return json.dumps(
-                {
-                    "status": "completed",
-                    "progress": f"{done}/{total}",
-                    "summary": _build_summary(job),
-                },
-                indent=2,
-            )
-
-        next_step = job["definition"]["steps"][done]
-        job["status"] = "running"
+    if failed > 0:
+        policy = _get_error_policy(job.definition, step_name)
         return json.dumps(
             {
-                "status": "in_progress",
+                "status": "error",
+                "step": step_name,
                 "progress": f"{done}/{total}",
-                "next_step": next_step,
+                "error": error,
+                "suggestion": _get_recovery_suggestion(policy, error),
             },
             indent=2,
         )
+
+    if done >= total:
+        return json.dumps(
+            {
+                "status": "completed",
+                "progress": f"{done}/{total}",
+                "summary": _build_summary(job.results),
+            },
+            indent=2,
+        )
+
+    steps = job.definition.get("steps", [])
+    next_step = steps[done] if done < len(steps) else {}
+    return json.dumps(
+        {
+            "status": "in_progress",
+            "progress": f"{done}/{total}",
+            "next_step": next_step,
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
 def loop_status(job_id: str) -> str:
-    """Check the status of a loop execution.
+    """Check the status of a loop execution from SQLite store.
 
     Args:
         job_id: The job ID to check.
     """
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if not job:
-            return f"Error: Job '{job_id}' not found."
+    job = _store.get_job(job_id)
+    if not job:
+        return f"Error: Job '{job_id}' not found."
 
-        total = job["definition"]["step_count"]
-        done = len(job["results"])
-        return json.dumps(
-            {
-                "job_id": job_id,
-                "loop_name": job["loop_name"],
-                "status": job["status"],
-                "progress": f"{done}/{total}",
-                "results": job["results"],
-            },
-            indent=2,
-        )
+    total = job.total_steps
+    done = len(job.results)
+    return json.dumps(
+        {
+            "job_id": job.job_id,
+            "loop_name": job.loop_name,
+            "status": job.status,
+            "progress": f"{done}/{total}",
+            "results": job.results,
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
 def loop_cancel(job_id: str) -> str:
-    """Cancel a loop execution.
+    """Cancel a loop execution in SQLite store.
 
     Args:
         job_id: The job ID to cancel.
     """
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if not job:
-            return f"Error: Job '{job_id}' not found."
-        job["status"] = "cancelled"
-        return f"Loop '{job['loop_name']}' cancelled."
+    job = _store.get_job(job_id)
+    if not job:
+        return f"Error: Job '{job_id}' not found."
+    _store.cancel_job(job_id)
+    return f"Loop '{job.loop_name}' cancelled."
 
 
 # ── LLM Execution via Unified LoopEngine ────────────────────────────────────
@@ -393,21 +386,31 @@ def loop_run(
 
     search = Path(search_dir) if search_dir else None
     files = _find_loop_files(search)
+    target_file = None
     target_loop_def = None
 
     for f in files:
         ldef = _load_loop_def_object(f)
         if ldef and ldef.name == loop_name:
+            target_file = f
             target_loop_def = ldef
             break
 
-    if not target_loop_def:
+    if not target_loop_def or not target_file:
         return f"Error: Loop '{loop_name}' not found."
 
     try:
         ctx_data = json.loads(context) if isinstance(context, str) else dict(context)
     except Exception as exc:
         return json.dumps({"error": f"Invalid context JSON: {exc}"})
+
+    job_id = f"{loop_name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    _store.create_job(
+        job_id=job_id,
+        loop_name=loop_name,
+        definition=_load_loop_def(target_file) or {"name": loop_name},
+        status="running",
+    )
 
     start_time = time.time()
     cost_tracker = CostTracker()
@@ -427,8 +430,15 @@ def loop_run(
         run_result = engine.run(target_loop_def, initial_context=ctx_data)
     except Exception as exc:
         duration_ms = int((time.time() - start_time) * 1000)
+        _store.update_job(
+            job_id=job_id,
+            status="failed",
+            error=str(exc),
+            completed=True,
+        )
         return json.dumps(
             {
+                "job_id": job_id,
                 "status": "failed",
                 "loop_name": loop_name,
                 "error": str(exc),
@@ -444,9 +454,23 @@ def loop_run(
         if res.success
     }
 
+    metrics = {
+        "total_cost": round(run_result.total_cost, 6),
+        "total_tokens": run_result.total_tokens,
+        "duration_ms": duration_ms,
+    }
+
     if run_result.success:
+        _store.update_job(
+            job_id=job_id,
+            status="completed",
+            results=output_results,
+            metrics=metrics,
+            completed=True,
+        )
         return json.dumps(
             {
+                "job_id": job_id,
                 "status": "completed",
                 "loop_name": loop_name,
                 "provider": config.provider,
@@ -460,8 +484,17 @@ def loop_run(
             indent=2,
         )
     else:
+        _store.update_job(
+            job_id=job_id,
+            status="failed",
+            results=output_results,
+            error=run_result.error or "Loop execution failed",
+            metrics=metrics,
+            completed=True,
+        )
         return json.dumps(
             {
+                "job_id": job_id,
                 "status": "failed",
                 "loop_name": loop_name,
                 "error": run_result.error or "Loop execution failed",
@@ -498,9 +531,8 @@ def _get_recovery_suggestion(policy: dict, error: str) -> str:
     return f"Abort the loop. Error: {error}"
 
 
-def _build_summary(job: dict) -> str:
-    """Build execution summary."""
-    results = job["results"]
+def _build_summary(results: dict) -> str:
+    """Build execution summary from results dict."""
     total = len(results)
     succeeded = sum(1 for r in results.values() if r["success"])
     failed = total - succeeded

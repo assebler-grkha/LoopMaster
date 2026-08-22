@@ -14,3 +14,8 @@ tests/
 ROADMAP.md
 .env
 docs/USAGE.md
+.loopmaster/
+*.db
+*.db-wal
+*.db-shm
+
