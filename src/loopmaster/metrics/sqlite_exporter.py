@@ -72,7 +72,7 @@ class SQLiteExporter:
     def _export_metric_points(self, collector: MetricsCollector) -> int:
         points = [
             (p.name, p.value, p.timestamp, json.dumps(p.tags) if p.tags else None)
-            for p in collector._points
+            for p in collector.get_all_points()
         ]
         if not points:
             return 0

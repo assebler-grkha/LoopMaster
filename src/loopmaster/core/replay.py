@@ -63,7 +63,9 @@ class ReplaySession:
                 steps.append(s)
             else:
                 steps.append(RecordedStep(**s))
-        return cls(recorded_steps=steps, **data)
+        known_fields = {"loop_name", "loop_version", "initial_context", "final_context"}
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        return cls(recorded_steps=steps, **filtered)
 
 
 class ResponseRecorder:
@@ -143,9 +145,9 @@ class ReplayRunner:
     def __init__(self, session: ReplaySession) -> None:
         self._session = session
         self._step_index = 0
-        self._results_by_name: dict[str, RecordedStep] = {}
+        self._results_by_name: dict[str, list[RecordedStep]] = {}
         for step in session.recorded_steps:
-            self._results_by_name[step.step_name] = step
+            self._results_by_name.setdefault(step.step_name, []).append(step)
 
     @property
     def initial_context(self) -> dict[str, Any]:
@@ -164,20 +166,25 @@ class ReplayRunner:
         if not recorded:
             return None
 
+        # Pop first recording for this step name (FIFO)
+        step_record = recorded.pop(0)
+        if not recorded:
+            del self._results_by_name[step_name]
+
         from .types import StepOutput
 
         output = None
-        if recorded.output is not None:
-            output = StepOutput(updates=recorded.output)
+        if step_record.output is not None:
+            output = StepOutput(updates=step_record.output)
 
         return StepResult(
             step_name=step_name,
-            success=recorded.error is None,
+            success=step_record.error is None,
             output=output,
-            error=recorded.error,
-            tokens_used=recorded.tokens_used,
-            cost=recorded.cost,
-            duration_ms=recorded.duration_ms,
+            error=step_record.error,
+            tokens_used=step_record.tokens_used,
+            cost=step_record.cost,
+            duration_ms=step_record.duration_ms,
         )
 
     def get_all_recorded_steps(self) -> list[RecordedStep]:

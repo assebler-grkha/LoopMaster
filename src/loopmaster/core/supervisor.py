@@ -48,18 +48,19 @@ class Supervisor:
         semaphore = asyncio.Semaphore(self.max_concurrency)
         result = SupervisorResult()
 
-        async def _run_step(step: Step) -> None:
+        async def _run_step(step: Step) -> tuple[str, StepResult]:
             async with semaphore:
-                # Run step.execute in a thread pool to avoid blocking the event loop
                 loop = asyncio.get_running_loop()
                 step_result = await loop.run_in_executor(None, step.execute, ctx_data)
-                result.results[step.name] = step_result
-                if not step_result.success:
-                    result.all_succeeded = False
-                    result.errors.append(f"{step.name}: {step_result.error}")
+                return step.name, step_result
 
         tasks = [asyncio.create_task(_run_step(s)) for s in steps]
-        # Wait for ALL tasks — never cancel siblings
-        await asyncio.gather(*tasks, return_exceptions=False)
+        pairs = await asyncio.gather(*tasks)
+
+        for name, step_result in pairs:
+            result.results[name] = step_result
+            if not step_result.success:
+                result.all_succeeded = False
+                result.errors.append(f"{name}: {step_result.error}")
 
         return result

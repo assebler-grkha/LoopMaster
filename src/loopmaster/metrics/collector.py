@@ -63,6 +63,18 @@ class LoopMetrics:
             "retries": self.retries,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LoopMetrics:
+        """Restore metrics from a serialized dictionary."""
+        return cls(
+            loop_name=data["loop_name"],
+            total_cost=data.get("total_cost", 0.0),
+            total_tokens=data.get("total_tokens", 0),
+            steps_executed=data.get("steps_executed", 0),
+            errors=data.get("errors", 0),
+            retries=data.get("retries", 0),
+        )
+
 
 class MetricsCollector:
     """Collects and stores loop execution metrics.
@@ -142,6 +154,10 @@ class MetricsCollector:
         """Get all loop metrics."""
         return dict(self._loops)
 
+    def get_all_points(self) -> list[MetricPoint]:
+        """Get all recorded metric points."""
+        return list(self._points)
+
     def save(self, filepath: str | Path) -> None:
         """Save metrics to a JSON file."""
         data = {
@@ -170,3 +186,5 @@ class MetricsCollector:
                     tags=p.get("tags", {}),
                 )
             )
+        for name, m_data in data.get("loops", {}).items():
+            self._loops[name] = LoopMetrics.from_dict(m_data)

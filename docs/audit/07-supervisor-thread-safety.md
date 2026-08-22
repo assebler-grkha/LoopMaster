@@ -44,3 +44,9 @@ for step, res in zip(steps, results):
 ### Tests
 - Concurrent step execution → results dict consistent
 - Error ordering deterministic
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

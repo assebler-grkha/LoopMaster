@@ -41,3 +41,9 @@ if re.search(r'[{}]', task_name):
 ### Tests
 - Malicious task name → rejected or escaped
 - Normal task name → works correctly
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

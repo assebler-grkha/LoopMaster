@@ -42,3 +42,9 @@ def load(self, filepath):
 ### Tests
 - Save/load preserves loop metadata
 - Recompute from points gives same result
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

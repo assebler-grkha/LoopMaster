@@ -22,10 +22,11 @@ class CheckpointError(LoopError):
 class BudgetExceededError(LoopError):
     """Raised when budget limit is exceeded."""
 
-    def __init__(self, budget_limit: float, spent: float):
+    def __init__(self, budget_limit: float, spent: float, unit: str = "$"):
         self.budget_limit = budget_limit
         self.spent = spent
-        super().__init__(f"Budget exceeded: ${spent:.4f} / ${budget_limit:.4f}")
+        self.unit = unit
+        super().__init__(f"Budget exceeded: {unit}{spent:.4f} / {unit}{budget_limit:.4f}")
 
 
 class InterruptedError(LoopError):

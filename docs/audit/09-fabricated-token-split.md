@@ -39,3 +39,9 @@ output_tokens = None
 ### Tests
 - API with token breakdown → uses actual values
 - API without breakdown → None, no cost calculation
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

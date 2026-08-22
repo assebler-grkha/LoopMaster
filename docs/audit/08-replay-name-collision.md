@@ -38,3 +38,9 @@ if len(names) != len(set(names)):
 ### Tests
 - Two steps with same name → error raised or index-based lookup
 - Replay matches recorded steps correctly
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

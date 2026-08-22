@@ -158,11 +158,13 @@ def generate_code(
         raise ValueError(msg)
 
     func_name = name_var.replace("-", "_")
+    safe_task = task.replace("{", "{{").replace("}", "}}") if task else task
+    safe_tool = tool.replace("{", "{{").replace("}", "}}") if tool else tool
     return _TEMPLATE_CODE[name].format(
         name=name_var,
         func_name=func_name,
-        task=task,
-        tool=tool,
+        task=safe_task,
+        tool=safe_tool,
     )
 
 

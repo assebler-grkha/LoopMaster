@@ -30,3 +30,9 @@ class BudgetExceededError(LoopError):
 ### Tests
 - Currency budget → dollar formatting
 - Step budget → plain number formatting
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

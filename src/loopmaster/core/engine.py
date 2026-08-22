@@ -206,6 +206,7 @@ class LoopEngine:
             raise BudgetExceededError(
                 budget_limit=float(self.budget.max_steps),
                 spent=float(len(executed_steps)),
+                unit="",
             )
 
         if self.budget and self.budget.max_cost is not None and total_cost >= self.budget.max_cost:
@@ -254,12 +255,11 @@ class LoopEngine:
             )
 
         if self._cost_tracker and step.model:
-            input_tokens = int(result.tokens_used * 0.7) if result.tokens_used else 0
-            output_tokens = result.tokens_used - input_tokens
+            input_tokens = result.tokens_used if result.tokens_used else 0
             self._cost_tracker.record(
                 model=step.model,
                 input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                output_tokens=0,
                 step_name=step.name,
             )
 

@@ -35,3 +35,9 @@ async def start_loop(self, loop_id: str, params: dict):
 
 ### Tests
 - start_loop raises NotImplementedError or executes correctly
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

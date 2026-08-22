@@ -40,3 +40,9 @@ def __init__(self, **kwargs):
 ### Tests
 - Load JSON with extra keys → no error
 - Load JSON with missing keys → defaults used
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

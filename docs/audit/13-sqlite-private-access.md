@@ -30,3 +30,9 @@ points = collector.points  # Instead of collector._points
 ### Tests
 - Exporter works with public API
 - Internal changes don't break exporter
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)

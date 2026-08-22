@@ -30,3 +30,11 @@ async def run(self, ..., checkpoint_resume=False):
 ### Tests
 - Two sequential run() calls → resume_count resets
 - checkpoint_resume=True → loads from checkpoint
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)
+
+**Commit:** 89504ad

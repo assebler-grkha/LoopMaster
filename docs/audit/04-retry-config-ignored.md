@@ -32,3 +32,11 @@ step_retries = max(step.retry, self.error_policy.retry)
 - `Step(retry=0)` → 0 retries
 - `Step(retry=5)` → 5 retries
 - `Step()` (None) → uses policy default
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)
+
+**Commit:** 89504ad

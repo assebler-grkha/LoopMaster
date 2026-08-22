@@ -36,3 +36,9 @@ webbrowser.open(docs_path.as_uri())
 ### Tests
 - Docs command works on Windows
 - Docs command works on Linux/macOS
+---
+## Status
+
+**Status:** FIXED
+
+**Commit:** batch fix (#07-#16)
