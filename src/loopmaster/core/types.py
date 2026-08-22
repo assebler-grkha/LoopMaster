@@ -35,10 +35,18 @@ class ErrorPolicy:
     fallback_model: str | None = None
 
     def classify(self, error_type: str) -> RecoveryAction:
-        """Classify an error type and return the recovery action."""
-        if error_type in ("RateLimitError", "TimeoutError"):
+        """Classify an error type or message and return the recovery action."""
+        err_str = str(error_type)
+        if (
+            "RateLimitError" in err_str
+            or "429" in err_str
+            or "Too Many Requests" in err_str
+            or "TimeoutError" in err_str
+            or "timed out" in err_str.lower()
+            or "Timeout" in err_str
+        ):
             return RecoveryAction.RETRY
-        if error_type in ("ValidationError", "SchemaError"):
+        if "ValidationError" in err_str or "SchemaError" in err_str:
             return RecoveryAction.SKIP
         return self.on_failure
 
@@ -139,6 +147,22 @@ class StepOutput:
     updates: dict[str, Any] = field(default_factory=dict)
 
 
+def resolve_prompt(template: str, ctx_data: dict[str, Any]) -> str:
+    """Resolve variables like {var} or {{var}} from context without failing on JSON braces."""
+    import re
+
+    if not template:
+        return template
+
+    def _repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in ctx_data:
+            return str(ctx_data[key])
+        return match.group(0)
+
+    return re.sub(r"\{\{?([a-zA-Z_]\w*)\}?\}", _repl, template)
+
+
 @dataclass
 class StepResult:
     """Result of a step execution."""
@@ -147,9 +171,16 @@ class StepResult:
     success: bool
     output: Any = None
     error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
     tokens_used: int = 0
     cost: float = 0.0
     duration_ms: float = 0.0
+    model: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.tokens_used == 0 and (self.input_tokens > 0 or self.output_tokens > 0):
+            self.tokens_used = self.input_tokens + self.output_tokens
 
 
 @dataclass
@@ -195,6 +226,7 @@ class Step:
                 tokens_used=tokens,
                 cost=cost,
                 duration_ms=duration,
+                model=self.model,
             )
         except Exception as exc:
             duration = (time.monotonic() - start) * 1000
@@ -203,6 +235,7 @@ class Step:
                 success=False,
                 error=str(exc),
                 duration_ms=duration,
+                model=self.model,
             )
         self._result = result
         return result
@@ -210,7 +243,7 @@ class Step:
     def _execute_default(self, ctx_data: dict[str, Any]) -> Any:
         """Default execution: return input or prompt-resolved string."""
         if self.prompt:
-            return self.prompt.format(**ctx_data)
+            return resolve_prompt(self.prompt, ctx_data)
         return self.input
 
     def to_dict(self) -> dict[str, Any]:

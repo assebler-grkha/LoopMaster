@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""LoopMaster MCP Server — loop definitions for OpenCode execution.
+"""LoopMaster MCP Server — loop definitions and execution engine.
 
-OpenCode IS the LLM provider. This server exposes loop definitions
-as structured data. OpenCode reads the definition, executes each step
-using its own LLM capabilities, and reports results back.
-
-Flow:
+Provides MCP tools to:
   1. loop_list  → discover available @Loop files
-  2. loop_start → returns full loop definition (steps, prompts, context)
-  3. OpenCode executes each step using its own model
-  4. loop_result → OpenCode reports step outcomes
-  5. loop_status → check overall progress
+  2. loop_get   → returns full loop definition (steps, prompts, context)
+  3. loop_result → report step outcomes (for agent-as-executor model)
+  4. loop_status → check overall progress
+  5. loop_cancel → cancel a running loop
+  6. loop_run    → execute a loop end-to-end via LoopEngine with multi-provider LLM API
 
 Usage:
     python scripts/loopmaster_mcp.py          # stdio mode (for MCP)
@@ -20,28 +17,29 @@ Usage:
 import importlib.util
 import json
 import logging
-import sys
+import os
 import threading
 import time
 from pathlib import Path
 
+from fastmcp import FastMCP
+
+from loopmaster.core.engine import LoopEngine
+from loopmaster.core.types import ErrorPolicy
+from loopmaster.core.types import LoopDef as LoopDefType
+from loopmaster.cost.tracker import CostTracker
+from loopmaster.llm import LLMClient, get_llm_config
+from loopmaster.metrics.collector import MetricsCollector
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("loopmaster-mcp")
-
-try:
-    from fastmcp import FastMCP
-except ImportError:
-    logger.exception("fastmcp not installed")
-    print("fastmcp not installed. Run: pip install fastmcp")
-    raise
 
 mcp = FastMCP(
     name="loopmaster",
     instructions=(
-        "LoopMaster provides AI agent loop definitions. "
-        "Use loop_list to discover loops, loop_start to get the full definition "
-        "(steps, prompts, error policies), then execute each step yourself. "
-        "Report results with loop_result."
+        "LoopMaster provides AI agent loop definitions and execution. "
+        "Use loop_list to discover loops, loop_run to execute loops via LoopEngine, "
+        "or loop_get + loop_result for step-by-step agent execution."
     ),
 )
 
@@ -52,9 +50,9 @@ _jobs_lock = threading.Lock()
 
 # ── Loop discovery ───────────────────────────────────────────────────────────
 
+
 def _find_loop_files(search_dir: Path | None = None) -> list[Path]:
     """Find .py files containing @Loop decorators."""
-    import os
     dirs = []
     if search_dir and search_dir.is_dir():
         dirs.append(search_dir)
@@ -78,13 +76,13 @@ def _find_loop_files(search_dir: Path | None = None) -> list[Path]:
                 content = py_file.read_text(encoding="utf-8")
                 if "@Loop" in content or "from loopmaster" in content:
                     results.append(py_file)
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.debug("Skipping unreadable file %s: %s", py_file, exc)
     return results
 
 
-def _load_loop_def(py_file: Path) -> dict | None:
-    """Load a LoopDef from a Python file and return it as a dict."""
+def _load_loop_def_object(py_file: Path) -> LoopDefType | None:
+    """Load raw LoopDef instance from a Python file."""
     try:
         spec = importlib.util.spec_from_file_location("_loop_mod", py_file)
         if spec is None or spec.loader is None:
@@ -92,27 +90,29 @@ def _load_loop_def(py_file: Path) -> dict | None:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        from loopmaster.core.types import LoopDef as LoopDefType
-
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
-            loop_def = None
             if isinstance(attr, LoopDefType):
-                loop_def = attr
-            elif hasattr(attr, "_loop_def"):
-                loop_def = attr._loop_def
-            if loop_def is not None:
-                return _loop_def_to_dict(loop_def, py_file)
+                return attr
+            if hasattr(attr, "_loop_def") and isinstance(attr._loop_def, LoopDefType):
+                return attr._loop_def
     except Exception as exc:
-        logger.debug("Failed to load %s: %s", py_file, exc)
+        logger.debug("Failed to load LoopDef object from %s: %s", py_file, exc)
     return None
 
 
-def _loop_def_to_dict(loop_def, source_file: Path) -> dict:
+def _load_loop_def(py_file: Path) -> dict | None:
+    """Load a LoopDef from a Python file and return it as a dict."""
+    loop_def = _load_loop_def_object(py_file)
+    if loop_def is not None:
+        return _loop_def_to_dict(loop_def, py_file)
+    return None
+
+
+def _loop_def_to_dict(loop_def: LoopDefType, source_file: Path) -> dict:
     """Convert LoopDef to a serializable dict with full step info."""
-    # Collect steps by running the body in collection mode
-    from loopmaster.core.engine import _set_current_steps
     from loopmaster.core.context import Context
+    from loopmaster.core.engine import _set_current_steps
 
     steps = []
     try:
@@ -120,7 +120,7 @@ def _loop_def_to_dict(loop_def, source_file: Path) -> dict:
         _set_current_steps(collected)
         ctx = Context({})
         ctx._loop_engine = None
-        ctx._executed_steps = set()
+        ctx._executed_steps = []
         ctx._results = {}
         ctx._current_error_policy = None
         loop_def.body(ctx)
@@ -163,6 +163,7 @@ def _loop_def_to_dict(loop_def, source_file: Path) -> dict:
 
 
 # ── MCP Tools ────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def loop_list(search_dir: str | None = None) -> str:
@@ -211,7 +212,6 @@ def loop_get(loop_name: str, search_dir: str | None = None) -> str:
     for f in files:
         info = _load_loop_def(f)
         if info and info["name"] == loop_name:
-            # Create a job to track this execution
             job_id = f"{loop_name}_{int(time.time())}"
             with _jobs_lock:
                 _jobs[job_id] = {
@@ -222,24 +222,33 @@ def loop_get(loop_name: str, search_dir: str | None = None) -> str:
                     "results": {},
                     "started_at": time.time(),
                 }
-            return json.dumps({
-                "job_id": job_id,
-                "loop": info,
-                "instructions": (
-                    "Execute each step in order. For each step:\n"
-                    "1. If step has 'prompt' and 'model' → use your LLM to generate a response\n"
-                    "2. If step has 'tool' and 'input' → call the specified tool\n"
-                    "3. Pass outputs between steps using the step name as variable\n"
-                    "4. Report each step result with loop_result\n"
-                    "5. If a step has 'on_error' policy, follow it on failure"
-                ),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "job_id": job_id,
+                    "loop": info,
+                    "instructions": (
+                        "Execute each step in order. For each step:\n"
+                        "1. If step has 'prompt' and 'model' → use your LLM to generate output\n"
+                        "2. If step has 'tool' and 'input' → call the specified tool\n"
+                        "3. Pass outputs between steps using the step name as variable\n"
+                        "4. Report each step result with loop_result\n"
+                        "5. If a step has 'on_error' policy, follow it on failure"
+                    ),
+                },
+                indent=2,
+            )
 
     return f"Error: Loop '{loop_name}' not found. Use loop_list to see available loops."
 
 
 @mcp.tool()
-def loop_result(job_id: str, step_name: str, success: bool, output: str = "", error: str = "") -> str:
+def loop_result(
+    job_id: str,
+    step_name: str,
+    success: bool,
+    output: str = "",
+    error: str = "",
+) -> str:
     """Report the result of executing a step.
 
     Called by OpenCode after executing each step of a loop.
@@ -271,29 +280,38 @@ def loop_result(job_id: str, step_name: str, success: bool, output: str = "", er
         if failed > 0:
             policy = _get_error_policy(job["definition"], step_name)
             job["status"] = "error"
-            return json.dumps({
-                "status": "error",
-                "step": step_name,
-                "progress": f"{done}/{total}",
-                "error": error,
-                "suggestion": _get_recovery_suggestion(policy, error),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "status": "error",
+                    "step": step_name,
+                    "progress": f"{done}/{total}",
+                    "error": error,
+                    "suggestion": _get_recovery_suggestion(policy, error),
+                },
+                indent=2,
+            )
 
         if done >= total:
             job["status"] = "completed"
-            return json.dumps({
-                "status": "completed",
-                "progress": f"{done}/{total}",
-                "summary": _build_summary(job),
-            }, indent=2)
+            return json.dumps(
+                {
+                    "status": "completed",
+                    "progress": f"{done}/{total}",
+                    "summary": _build_summary(job),
+                },
+                indent=2,
+            )
 
         next_step = job["definition"]["steps"][done]
         job["status"] = "running"
-        return json.dumps({
-            "status": "in_progress",
-            "progress": f"{done}/{total}",
-            "next_step": next_step,
-        }, indent=2)
+        return json.dumps(
+            {
+                "status": "in_progress",
+                "progress": f"{done}/{total}",
+                "next_step": next_step,
+            },
+            indent=2,
+        )
 
 
 @mcp.tool()
@@ -310,13 +328,16 @@ def loop_status(job_id: str) -> str:
 
         total = job["definition"]["step_count"]
         done = len(job["results"])
-        return json.dumps({
-            "job_id": job_id,
-            "loop_name": job["loop_name"],
-            "status": job["status"],
-            "progress": f"{done}/{total}",
-            "results": job["results"],
-        }, indent=2)
+        return json.dumps(
+            {
+                "job_id": job_id,
+                "loop_name": job["loop_name"],
+                "status": job["status"],
+                "progress": f"{done}/{total}",
+                "results": job["results"],
+            },
+            indent=2,
+        )
 
 
 @mcp.tool()
@@ -334,11 +355,17 @@ def loop_cancel(job_id: str) -> str:
         return f"Loop '{job['loop_name']}' cancelled."
 
 
-# ── LLM Execution ───────────────────────────────────────────────────────────
+# ── LLM Execution via Unified LoopEngine ────────────────────────────────────
+
 
 @mcp.tool()
-def loop_run(loop_name: str, context: str = "{}", model: str | None = None, search_dir: str | None = None) -> str:
-    """Execute a loop end-to-end using LLM API.
+def loop_run(
+    loop_name: str,
+    context: str = "{}",
+    model: str | None = None,
+    search_dir: str | None = None,
+) -> str:
+    """Execute a loop end-to-end using LoopEngine and multi-provider LLM API.
 
     Requires LOOPMASTER_LLM_API_KEY env var (or LOOPMASTER_<PROVIDER>_API_KEY).
     Supported providers: openai, anthropic, google, openrouter, custom.
@@ -349,103 +376,109 @@ def loop_run(loop_name: str, context: str = "{}", model: str | None = None, sear
         model: Override the default model for all steps.
         search_dir: Optional directory to search for loop files.
     """
-    from llm_client import get_llm_config, complete
-
     config = get_llm_config(model_override=model)
     if not config:
-        return json.dumps({
-            "error": "No LLM API key configured",
-            "help": (
-                "Set one of:\n"
-                "  LOOPMASTER_LLM_API_KEY=sk-xxx\n"
-                "  LOOPMASTER_OPENAI_API_KEY=sk-xxx\n"
-                "  LOOPMASTER_ANTHROPIC_API_KEY=sk-ant-xxx\n"
-                "  LOOPMASTER_OPENROUTER_API_KEY=sk-or-xxx"
-            ),
-        })
+        return json.dumps(
+            {
+                "error": "No LLM API key configured",
+                "help": (
+                    "Set one of:\n"
+                    "  LOOPMASTER_LLM_API_KEY=sk-xxx\n"
+                    "  LOOPMASTER_OPENAI_API_KEY=sk-xxx\n"
+                    "  LOOPMASTER_ANTHROPIC_API_KEY=sk-ant-xxx\n"
+                    "  LOOPMASTER_OPENROUTER_API_KEY=sk-or-xxx"
+                ),
+            }
+        )
 
     search = Path(search_dir) if search_dir else None
     files = _find_loop_files(search)
-    loop_info = None
+    target_loop_def = None
+
     for f in files:
-        info = _load_loop_def(f)
-        if info and info["name"] == loop_name:
-            loop_info = info
+        ldef = _load_loop_def_object(f)
+        if ldef and ldef.name == loop_name:
+            target_loop_def = ldef
             break
-    if not loop_info:
+
+    if not target_loop_def:
         return f"Error: Loop '{loop_name}' not found."
 
-    ctx = json.loads(context)
-    results = {}
-    steps = loop_info["steps"]
-    total_cost = 0.0
-    total_tokens = 0
+    try:
+        ctx_data = json.loads(context) if isinstance(context, str) else dict(context)
+    except Exception as exc:
+        return json.dumps({"error": f"Invalid context JSON: {exc}"})
+
     start_time = time.time()
+    cost_tracker = CostTracker()
+    metrics_collector = MetricsCollector()
+    llm_client = LLMClient(config=config)
 
-    for i, step in enumerate(steps):
-        step_name = step["name"]
-        prompt = step.get("prompt", "")
-        step_model = step.get("model") or config.model
+    engine = LoopEngine(
+        budget=target_loop_def.budget,
+        error_policy=ErrorPolicy(),
+        interruption_protection=target_loop_def.interruption_protection,
+        cost_tracker=cost_tracker,
+        metrics_collector=metrics_collector,
+        llm_client=llm_client,
+    )
 
-        for var, val in ctx.items():
-            prompt = prompt.replace("{{" + var + "}}", str(val))
-
-        retries = step.get("retry", 0)
-        last_error = None
-
-        for attempt in range(retries + 1):
-            try:
-                step_config = LLMConfig(
-                    provider=config.provider,
-                    api_key=config.api_key,
-                    base_url=config.base_url,
-                    model=step_model,
-                    max_tokens=config.max_tokens,
-                    temperature=config.temperature,
-                ) if step_model != config.model else config
-                output = complete(step_config, prompt)
-                results[step_name] = output
-                ctx[step_name] = output
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = str(exc)
-                logger.warning("Step %s attempt %d failed: %s", step_name, attempt + 1, exc)
-
-        if last_error:
-            on_error = step.get("on_error", {})
-            action = on_error.get("on_failure", "abort")
-            if action == "skip":
-                results[step_name] = f"[SKIPPED] {last_error}"
-                continue
-            return json.dumps({
+    try:
+        run_result = engine.run(target_loop_def, initial_context=ctx_data)
+    except Exception as exc:
+        duration_ms = int((time.time() - start_time) * 1000)
+        return json.dumps(
+            {
                 "status": "failed",
-                "failed_step": step_name,
-                "error": last_error,
-                "completed_steps": results,
-                "progress": f"{i}/{len(steps)}",
-            })
+                "loop_name": loop_name,
+                "error": str(exc),
+                "duration_ms": duration_ms,
+            },
+            indent=2,
+        )
 
     duration_ms = int((time.time() - start_time) * 1000)
-    return json.dumps({
-        "status": "completed",
-        "loop_name": loop_name,
-        "provider": config.provider,
-        "model": config.model,
-        "results": results,
-        "steps_completed": len(results),
-        "duration_ms": duration_ms,
-    }, indent=2)
+    output_results = {
+        name: (res.output.content if hasattr(res.output, "content") else res.output)
+        for name, res in run_result.results.items()
+        if res.success
+    }
 
-
-from llm_client import LLMConfig  # noqa: E402
+    if run_result.success:
+        return json.dumps(
+            {
+                "status": "completed",
+                "loop_name": loop_name,
+                "provider": config.provider,
+                "model": config.model,
+                "results": output_results,
+                "steps_completed": len(run_result.steps_executed),
+                "total_cost": round(run_result.total_cost, 6),
+                "total_tokens": run_result.total_tokens,
+                "duration_ms": duration_ms,
+            },
+            indent=2,
+        )
+    else:
+        return json.dumps(
+            {
+                "status": "failed",
+                "loop_name": loop_name,
+                "error": run_result.error or "Loop execution failed",
+                "completed_steps": output_results,
+                "steps_executed": run_result.steps_executed,
+                "duration_ms": duration_ms,
+            },
+            indent=2,
+        )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _get_error_policy(loop_def: dict, step_name: str) -> dict:
     """Get error policy for a step."""
-    for step in loop_def["steps"]:
+    for step in loop_def.get("steps", []):
         if step["name"] == step_name and "on_error" in step:
             return step["on_error"]
     return {"retry": 2, "on_failure": "abort"}

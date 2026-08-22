@@ -21,6 +21,7 @@ from loopmaster.core.types import (
     StepInput,
     StepOutput,
     StepResult,
+    resolve_prompt,
 )
 
 __all__ = [
@@ -47,4 +48,5 @@ __all__ = [
     "ResponseRecorder",
     "ReplaySession",
     "ReplayRunner",
+    "resolve_prompt",
 ]

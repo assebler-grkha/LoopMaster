@@ -1,6 +1,6 @@
-"""LLM client for LoopMaster — re-exports from loopmaster.llm for backwards compatibility."""
+"""LLM client package for LoopMaster."""
 
-from loopmaster.llm import (
+from .client import (
     AuthenticationError,
     LLMClient,
     LLMConfig,
@@ -14,9 +14,9 @@ from loopmaster.llm import (
 )
 
 __all__ = [
+    "LLMClient",
     "LLMConfig",
     "LLMResponse",
-    "LLMClient",
     "LLMError",
     "RateLimitError",
     "TimeoutError",

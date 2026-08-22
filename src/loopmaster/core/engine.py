@@ -79,6 +79,7 @@ class LoopEngine:
         checkpoint_dir: str | None = None,
         metrics_collector: MetricsCollector | None = None,
         cost_tracker: CostTracker | None = None,
+        llm_client: Any = None,
     ) -> None:
         self.error_policy = error_policy or ErrorPolicy()
         self.budget = budget
@@ -86,6 +87,7 @@ class LoopEngine:
         self.checkpoint_dir = checkpoint_dir
         self._collector = metrics_collector
         self._cost_tracker = cost_tracker
+        self._llm_client = llm_client
         self._registry: dict[str, Any] = {}
         self._on_step_complete: Callable[[StepResult], None] | None = None
         self._heartbeat: HeartbeatState | None = None
@@ -192,6 +194,7 @@ class LoopEngine:
         executed_steps: list[str],
         results: dict[str, StepResult],
         total_cost: float,
+        total_tokens: int = 0,
     ) -> None:
         if self._heartbeat and is_interrupted(self._heartbeat):
             self._make_checkpoint(loop_def, ctx, executed_steps, results)
@@ -216,6 +219,18 @@ class LoopEngine:
                 spent=total_cost,
             )
 
+        if (
+            self.budget
+            and self.budget.max_tokens is not None
+            and total_tokens >= self.budget.max_tokens
+        ):
+            self._make_checkpoint(loop_def, ctx, executed_steps, results)
+            raise BudgetExceededError(
+                budget_limit=float(self.budget.max_tokens),
+                spent=float(total_tokens),
+                unit="tokens",
+            )
+
     def _apply_step_result(
         self,
         loop_def: Any,
@@ -231,12 +246,13 @@ class LoopEngine:
         ctx._results = results
 
         if result.success and result.output is not None:
-            if isinstance(result.output, dict):
+            if isinstance(result.output, StepOutput):
+                ctx.merge(result.output.updates)
+            elif isinstance(result.output, dict):
                 ctx.merge(result.output)
             else:
-                output_updates = getattr(result.output, "updates", None)
-                if output_updates:
-                    ctx.merge(output_updates)
+                output_val = getattr(result.output, "content", result.output)
+                ctx._data[step.name] = output_val
 
         cost_added = result.cost or 0.0
         tokens_added = result.tokens_used or 0
@@ -254,14 +270,23 @@ class LoopEngine:
                 success=result.success,
             )
 
-        if self._cost_tracker and step.model:
-            input_tokens = result.tokens_used if result.tokens_used else 0
-            self._cost_tracker.record(
-                model=step.model,
-                input_tokens=input_tokens,
-                output_tokens=0,
+        model_used = result.model or step.model
+        if self._cost_tracker and model_used:
+            in_tok = result.input_tokens
+            out_tok = result.output_tokens
+            if in_tok == 0 and out_tok == 0 and result.tokens_used > 0:
+                in_tok = result.tokens_used
+            recorded_cost = self._cost_tracker.record(
+                model=model_used,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
                 step_name=step.name,
             )
+            if not result.cost:
+                result.cost = recorded_cost
+
+        cost_added = result.cost or 0.0
+        tokens_added = result.tokens_used or 0
 
         if self._on_step_complete:
             self._on_step_complete(result)
@@ -316,7 +341,9 @@ class LoopEngine:
                 if step.name in executed_steps:
                     continue
 
-                self._check_budget_limits(loop_def, ctx, executed_steps, results, total_cost)
+                self._check_budget_limits(
+                    loop_def, ctx, executed_steps, results, total_cost, total_tokens
+                )
 
                 if ip and ip.enabled and ip.pre_step_checkpoint:
                     self._make_checkpoint(loop_def, ctx, executed_steps, results)
@@ -327,6 +354,8 @@ class LoopEngine:
                     loop_def=loop_def,
                     error_policy=self.error_policy,
                     collector=self._collector,
+                    llm_client=self._llm_client,
+                    cost_tracker=self._cost_tracker,
                 )
 
                 cost_added, tokens_added = self._apply_step_result(
