@@ -56,11 +56,15 @@ class LoopMetrics:
             "total_cost": self.total_cost,
             "total_tokens": self.total_tokens,
             "steps_executed": self.steps_executed,
+            "step_durations_ms": list(self.step_durations_ms),
+            "step_costs": list(self.step_costs),
             "duration_ms": self.duration_ms,
             "cost_per_step": self.cost_per_step,
             "tokens_per_step": self.tokens_per_step,
             "errors": self.errors,
             "retries": self.retries,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
         }
 
     @classmethod
@@ -71,8 +75,12 @@ class LoopMetrics:
             total_cost=data.get("total_cost", 0.0),
             total_tokens=data.get("total_tokens", 0),
             steps_executed=data.get("steps_executed", 0),
+            step_durations_ms=data.get("step_durations_ms", []),
+            step_costs=data.get("step_costs", []),
             errors=data.get("errors", 0),
             retries=data.get("retries", 0),
+            start_time=data.get("start_time", 0.0),
+            end_time=data.get("end_time", 0.0),
         )
 
 

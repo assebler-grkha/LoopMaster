@@ -39,6 +39,7 @@ class AgentAdapter(abc.ABC):
 
     def __init__(self) -> None:
         self._snapshots: dict[Path, bytes] = {}
+        self._created_files: set[Path] = set()
 
     def snapshot(self, path: Path) -> None:
         """Snapshot file content before modification. Idempotent per path."""

@@ -7,6 +7,7 @@ This supervisor collects results and applies ErrorPolicy per-step.
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,13 +52,19 @@ class Supervisor:
         async def _run_step(step: Step) -> tuple[str, StepResult]:
             async with semaphore:
                 loop = asyncio.get_running_loop()
-                step_result = await loop.run_in_executor(None, step.execute, ctx_data)
+                isolated_ctx = copy.deepcopy(ctx_data)
+                step_result = await loop.run_in_executor(None, step.execute, isolated_ctx)
                 return step.name, step_result
 
         tasks = [asyncio.create_task(_run_step(s)) for s in steps]
-        pairs = await asyncio.gather(*tasks)
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for name, step_result in pairs:
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                result.all_succeeded = False
+                result.errors.append(f"parallel task failed: {outcome}")
+                continue
+            name, step_result = outcome
             result.results[name] = step_result
             if not step_result.success:
                 result.all_succeeded = False

@@ -73,11 +73,14 @@ class CustomAdapter(AgentAdapter):
         if not self._prompt_path:
             return
         self._prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not self._prompt_path.exists()
         self.snapshot(self._prompt_path)
         prompt = self.read_system_prompt()
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
         self._prompt_path.write_text(updated, encoding="utf-8")
+        if is_new:
+            self._created_files.add(self._prompt_path)
 
     def validate_config(self) -> bool:
         return any(p.exists() for p in self._config_paths)
@@ -86,6 +89,9 @@ class CustomAdapter(AgentAdapter):
         for path, content in self._snapshots.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        for path in self._created_files:
+            if path.exists():
+                path.unlink()
 
     @property
     def config_files(self) -> list[Path]:
@@ -171,11 +177,14 @@ class OpenCodeAdapter(AgentAdapter):
             prompts = sorted(agent_dir.glob("*.md"))
             prompt_file = prompts[-1] if prompts else agent_dir / "loop-instructions.md"
 
+        is_new = not prompt_file.exists()
         self.snapshot(prompt_file)
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
         prompt_file.write_text(updated, encoding="utf-8")
+        if is_new:
+            self._created_files.add(prompt_file)
 
     def validate_config(self) -> bool:
         return self.CONFIG_DIR.exists() or (self._project_root / "opencode.json").exists()
@@ -184,6 +193,9 @@ class OpenCodeAdapter(AgentAdapter):
         for path, content in self._snapshots.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        for path in self._created_files:
+            if path.exists():
+                path.unlink()
 
     @property
     def config_files(self) -> list[Path]:
@@ -263,11 +275,14 @@ class ClaudeCodeAdapter(AgentAdapter):
         claude_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = claude_dir / "CLAUDE.md"
 
+        is_new = not prompt_file.exists()
         self.snapshot(prompt_file)
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
         prompt_file.write_text(updated, encoding="utf-8")
+        if is_new:
+            self._created_files.add(prompt_file)
 
     def validate_config(self) -> bool:
         return self.SETTINGS_FILE.exists() or (self._project_root / ".claude").exists()
@@ -276,6 +291,9 @@ class ClaudeCodeAdapter(AgentAdapter):
         for path, content in self._snapshots.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        for path in self._created_files:
+            if path.exists():
+                path.unlink()
 
     @property
     def config_files(self) -> list[Path]:
@@ -356,11 +374,14 @@ class CursorAdapter(AgentAdapter):
     def inject_loop_context(self, loop_context: str) -> None:
         rules_file = self.RULES_FILE
         rules_file.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not rules_file.exists()
         self.snapshot(rules_file)
         prompt = rules_file.read_text(encoding="utf-8") if rules_file.exists() else ""
         pm = PromptManager()
         updated = pm.inject(prompt, loop_context)
         rules_file.write_text(updated, encoding="utf-8")
+        if is_new:
+            self._created_files.add(rules_file)
 
     def validate_config(self) -> bool:
         return self.SETTINGS_FILE.exists() or (self._project_root / ".cursor").exists()
@@ -369,6 +390,9 @@ class CursorAdapter(AgentAdapter):
         for path, content in self._snapshots.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        for path in self._created_files:
+            if path.exists():
+                path.unlink()
 
     @property
     def config_files(self) -> list[Path]:
