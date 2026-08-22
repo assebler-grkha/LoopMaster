@@ -11,3 +11,6 @@ build/
 theme
 loops/
 tests/
+ROADMAP.md
+.env
+docs/USAGE.md

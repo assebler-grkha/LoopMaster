@@ -334,6 +334,113 @@ def loop_cancel(job_id: str) -> str:
         return f"Loop '{job['loop_name']}' cancelled."
 
 
+# ── LLM Execution ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+def loop_run(loop_name: str, context: str = "{}", model: str | None = None, search_dir: str | None = None) -> str:
+    """Execute a loop end-to-end using LLM API.
+
+    Requires LOOPMASTER_LLM_API_KEY env var (or LOOPMASTER_<PROVIDER>_API_KEY).
+    Supported providers: openai, anthropic, google, openrouter, custom.
+
+    Args:
+        loop_name: Name of the loop to execute.
+        context: JSON string with input variables for the loop.
+        model: Override the default model for all steps.
+        search_dir: Optional directory to search for loop files.
+    """
+    from llm_client import get_llm_config, complete
+
+    config = get_llm_config(model_override=model)
+    if not config:
+        return json.dumps({
+            "error": "No LLM API key configured",
+            "help": (
+                "Set one of:\n"
+                "  LOOPMASTER_LLM_API_KEY=sk-xxx\n"
+                "  LOOPMASTER_OPENAI_API_KEY=sk-xxx\n"
+                "  LOOPMASTER_ANTHROPIC_API_KEY=sk-ant-xxx\n"
+                "  LOOPMASTER_OPENROUTER_API_KEY=sk-or-xxx"
+            ),
+        })
+
+    search = Path(search_dir) if search_dir else None
+    files = _find_loop_files(search)
+    loop_info = None
+    for f in files:
+        info = _load_loop_def(f)
+        if info and info["name"] == loop_name:
+            loop_info = info
+            break
+    if not loop_info:
+        return f"Error: Loop '{loop_name}' not found."
+
+    ctx = json.loads(context)
+    results = {}
+    steps = loop_info["steps"]
+    total_cost = 0.0
+    total_tokens = 0
+    start_time = time.time()
+
+    for i, step in enumerate(steps):
+        step_name = step["name"]
+        prompt = step.get("prompt", "")
+        step_model = step.get("model") or config.model
+
+        for var, val in ctx.items():
+            prompt = prompt.replace("{{" + var + "}}", str(val))
+
+        retries = step.get("retry", 0)
+        last_error = None
+
+        for attempt in range(retries + 1):
+            try:
+                step_config = LLMConfig(
+                    provider=config.provider,
+                    api_key=config.api_key,
+                    base_url=config.base_url,
+                    model=step_model,
+                    max_tokens=config.max_tokens,
+                    temperature=config.temperature,
+                ) if step_model != config.model else config
+                output = complete(step_config, prompt)
+                results[step_name] = output
+                ctx[step_name] = output
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning("Step %s attempt %d failed: %s", step_name, attempt + 1, exc)
+
+        if last_error:
+            on_error = step.get("on_error", {})
+            action = on_error.get("on_failure", "abort")
+            if action == "skip":
+                results[step_name] = f"[SKIPPED] {last_error}"
+                continue
+            return json.dumps({
+                "status": "failed",
+                "failed_step": step_name,
+                "error": last_error,
+                "completed_steps": results,
+                "progress": f"{i}/{len(steps)}",
+            })
+
+    duration_ms = int((time.time() - start_time) * 1000)
+    return json.dumps({
+        "status": "completed",
+        "loop_name": loop_name,
+        "provider": config.provider,
+        "model": config.model,
+        "results": results,
+        "steps_completed": len(results),
+        "duration_ms": duration_ms,
+    }, indent=2)
+
+
+from llm_client import LLMConfig  # noqa: E402
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _get_error_policy(loop_def: dict, step_name: str) -> dict:
