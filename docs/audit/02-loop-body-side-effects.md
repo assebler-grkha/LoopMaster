@@ -3,7 +3,8 @@
 **Severity:** P0 — Critical  
 **File:** `core/engine.py`  
 **Lines:** 212-229  
-**Tags:** correctness, side-effects
+**Tags:** correctness, side-effects  
+**Status:** FIXED
 
 ## Problem
 

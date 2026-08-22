@@ -168,16 +168,21 @@ class LoopEngine:
         executed_steps: list[str],
         results: dict[str, StepResult],
     ) -> list[Step]:
+        ctx._loop_engine = self
+        ctx._executed_steps = executed_steps
+        ctx._results = results
+        ctx._current_error_policy = self.error_policy
+
+        if loop_def._collected_steps is not None:
+            return list(loop_def._collected_steps)
+
         collected_steps: list[Step] = []
         _set_current_steps(collected_steps)
         try:
-            ctx._loop_engine = self
-            ctx._executed_steps = executed_steps
-            ctx._results = results
-            ctx._current_error_policy = self.error_policy
             loop_def.body(ctx)
         finally:
             _set_current_steps(None)
+        loop_def._collected_steps = list(collected_steps)
         return collected_steps
 
     def _check_budget_limits(
@@ -302,6 +307,8 @@ class LoopEngine:
             self._collector.start_loop(loop_def.name)
 
         try:
+            if resume_checkpoint is None:
+                loop_def._collected_steps = None
             collected_steps = self._collect_steps_from_loop(loop_def, ctx, executed_steps, results)
 
             for step in collected_steps:

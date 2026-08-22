@@ -286,6 +286,7 @@ class LoopDef:
     budget: Budget | None = None
     interruption_protection: InterruptionProtection | None = None
     source_hash: str = ""
+    _collected_steps: list[Step] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.source_hash:

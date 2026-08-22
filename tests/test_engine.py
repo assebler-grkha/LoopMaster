@@ -343,3 +343,48 @@ class TestEngineMetricsIntegration:
         engine.run(my_loop)
         metrics = collector.get_loop_metrics("retry_loop")
         assert metrics.retries == 1
+
+
+def test_loop_body_not_reexecuted_on_resume(tmp_path):
+    """Loop body must not run again when resuming from checkpoint."""
+    from loopmaster.checkpoint import CheckpointManager
+
+    body_call_count = {"n": 0}
+
+    @Loop(name="cache_test")
+    def my_loop(ctx):
+        body_call_count["n"] += 1
+        s1 = Step("s1", input="hello")
+        s1._engine_callback = lambda s, c: StepOutput(updates={"x": 1})
+        s2 = Step("s2", input="world")
+        s2._engine_callback = lambda s, c: StepOutput(updates={"y": 2})
+
+    engine = LoopEngine(checkpoint_dir=str(tmp_path))
+    result = engine.run(my_loop, initial_context={"a": 1})
+
+    assert body_call_count["n"] == 1
+    assert len(result.results) == 2
+
+    mgr = CheckpointManager(str(tmp_path))
+    cp = mgr.load_latest("cache_test")
+    assert cp is not None
+
+    result2 = engine.run(my_loop, resume_checkpoint=cp)
+    assert body_call_count["n"] == 1, "Body was re-executed during resume"
+
+
+def test_dynamic_body_fresh_run_recollects(tmp_path):
+    """Dynamic body with context-dependent steps collects fresh on each run."""
+    engine = LoopEngine(checkpoint_dir=str(tmp_path))
+
+    @Loop(name="dynamic_loop")
+    def my_loop(ctx):
+        mode = ctx.get("mode", "default")
+        s1 = Step(f"step_{mode}", input=mode)
+        s1._engine_callback = lambda s, c: StepOutput(updates={"mode": c.get("mode")})
+
+    r1 = engine.run(my_loop, initial_context={"mode": "fast"})
+    assert "step_fast" in r1.results
+
+    r2 = engine.run(my_loop, initial_context={"mode": "slow"})
+    assert "step_slow" in r2.results
