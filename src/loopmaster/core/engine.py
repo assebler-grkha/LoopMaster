@@ -291,6 +291,7 @@ class LoopEngine:
         initial_context: dict[str, Any] | None = None,
         resume_checkpoint: CheckpointData | None = None,
     ) -> LoopRunResult:
+        self._resume_count = 0
         ctx, executed_steps, results = self._init_run_state(initial_context, resume_checkpoint)
         total_cost, total_tokens, interrupted = 0.0, 0, False
         ip = self.interruption_protection
