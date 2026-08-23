@@ -80,14 +80,12 @@ opencode (агент)                    MCP-сервер LoopMaster
 
 ### P2: Желаемые (1-2 месяца)
 
-#### Conditional branching в DSL
-```python
-Conditional(
-    condition=lambda ctx: "error" in ctx.get("analyze", ""),
-    then_steps=[Step("retry", model="gpt-4", prompt="Retry")],
-    else_steps=[Step("proceed", model="gpt-4", prompt="Proceed")],
-)
-```
+#### ✅ Conditional branching в DSL
+- Декларативный блок `Conditional(condition, then_steps, else_steps, name)`
+- Безопасный парсер условий `evaluate_condition` на базе AST whitelist без уязвимостей `eval()`
+- Защита от потери ветки при возобновлении из чекпоинта (branch stickiness on resume)
+- Изоляция скоупа сбора дочерних шагов на базе `id(s)` без конфликтов с мутабельными датаклассами
+- Сквозная интеграция с SSE (`branch_selected`), OpenTelemetry (`conditional.<name>` спаны), YAML экспортом и MCP discovery
 
 #### Tool execution bridge
 Встроенные executors: ShellExecutor, HTTPExecutor, MCPToolExecutor.

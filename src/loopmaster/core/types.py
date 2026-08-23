@@ -275,9 +275,60 @@ class Parallel:
     def __init__(self, *steps: Step):
         self.steps = list(steps)
 
+    def __post_init__(self) -> None:
+        from .engine import _get_current_steps
+
+        current_steps = _get_current_steps()
+        if current_steps is not None:
+            contained_ids = {id(s) for s in self.steps}
+            current_steps[:] = [s for s in current_steps if id(s) not in contained_ids]
+            current_steps.append(self)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for YAML export."""
         return {"parallel": [s.to_dict() for s in self.steps]}
+
+
+@dataclass
+class Conditional:
+    """A conditional branching construct in a loop."""
+
+    condition: Callable[[Any], bool] | str | bool
+    then_steps: list[Any] = field(default_factory=list)
+    else_steps: list[Any] = field(default_factory=list)
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        from .engine import _get_current_steps
+
+        current_steps = _get_current_steps()
+        if current_steps is not None:
+            contained_ids = {id(s) for s in (*self.then_steps, *self.else_steps)}
+            current_steps[:] = [s for s in current_steps if id(s) not in contained_ids]
+            current_steps.append(self)
+
+    def evaluate(self, ctx: Any) -> bool:
+        """Evaluate the condition against current execution context."""
+        from .condition import evaluate_condition
+
+        return evaluate_condition(self.condition, ctx)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for YAML export."""
+        cond_repr = (
+            getattr(self.condition, "__name__", "<callable>")
+            if callable(self.condition)
+            else str(self.condition)
+        )
+        d: dict[str, Any] = {
+            "condition": cond_repr,
+            "then": [s.to_dict() for s in self.then_steps],
+        }
+        if self.else_steps:
+            d["else"] = [s.to_dict() for s in self.else_steps]
+        if self.name:
+            d["name"] = self.name
+        return {"conditional": d}
 
 
 def _get_source_hash(func: Callable[..., Any]) -> str:

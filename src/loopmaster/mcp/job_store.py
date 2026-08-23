@@ -21,7 +21,7 @@ class JobData:
 
     job_id: str
     loop_name: str
-    status: str = "ready"  # ready, running, in_progress, completed, error, failed, cancelled, ...
+    status: str = "ready"  # ready, running, in_progress, completed, error, failed, cancelled
     current_step: int = 0
     total_steps: int = 0
     definition: dict[str, Any] = field(default_factory=dict)
@@ -66,11 +66,7 @@ class JobStore:
     def conn(self) -> sqlite3.Connection:
         """Get or initialize the thread-safe SQLite connection."""
         if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                timeout=30.0,
-                check_same_thread=False,
-            )
+            self._conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             if str(self.db_path) != ":memory:":
                 cur = self._conn.cursor()
@@ -167,9 +163,7 @@ class JobStore:
             cur.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
             row = cur.fetchone()
             cur.close()
-            if not row:
-                return None
-            return self._row_to_job(row)
+            return self._row_to_job(row) if row else None
 
     def update_job(
         self,
@@ -199,6 +193,7 @@ class JobStore:
             if metrics is not None:
                 job.metrics = metrics
             if completed:
+                job.status = "completed"
                 job.completed_at = now
             job.updated_at = now
 
@@ -206,22 +201,19 @@ class JobStore:
             cur.execute(
                 """
                 UPDATE jobs SET
-                    status = ?,
-                    current_step = ?,
-                    results = ?,
-                    error = ?,
-                    metrics = ?,
-                    completed_at = ?,
-                    updated_at = ?
+                    status = ?, current_step = ?, total_steps = ?, definition = ?,
+                    results = ?, completed_at = ?, error = ?, metrics = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
                     job.status,
                     job.current_step,
+                    job.total_steps,
+                    json.dumps(job.definition, default=str),
                     json.dumps(job.results, default=str),
+                    job.completed_at,
                     job.error,
                     json.dumps(job.metrics, default=str) if job.metrics else None,
-                    job.completed_at,
                     job.updated_at,
                     job.job_id,
                 ),
@@ -235,10 +227,10 @@ class JobStore:
         job_id: str,
         step_name: str,
         success: bool,
-        output: Any = "",
-        error: str = "",
+        output: Any = None,
+        error: str | None = None,
     ) -> JobData | None:
-        """Atomically record the result of a step."""
+        """Record the result of a single step."""
         with self._lock:
             job = self.get_job(job_id)
             if not job:
@@ -254,14 +246,11 @@ class JobStore:
             job.current_step = len(job.results)
             job.updated_at = now
 
-            total = job.total_steps
-            done = len(job.results)
             failed = sum(1 for r in job.results.values() if not r["success"])
-
             if failed > 0:
                 job.status = "error"
                 job.error = error or job.error
-            elif done >= total:
+            elif job.total_steps > 0 and len(job.results) >= job.total_steps:
                 job.status = "completed"
                 job.completed_at = now
             else:
@@ -271,12 +260,8 @@ class JobStore:
             cur.execute(
                 """
                 UPDATE jobs SET
-                    status = ?,
-                    current_step = ?,
-                    results = ?,
-                    error = ?,
-                    completed_at = ?,
-                    updated_at = ?
+                    status = ?, current_step = ?, results = ?,
+                    error = ?, completed_at = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
@@ -394,8 +379,6 @@ class JobStore:
             metrics=metrics,
         )
 
-
-# ── Singleton instance / accessor ───────────────────────────────────────────
 
 _global_store: JobStore | None = None
 _store_lock = threading.Lock()

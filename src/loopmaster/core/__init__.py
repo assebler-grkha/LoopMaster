@@ -12,6 +12,7 @@ from loopmaster.core.replay import ReplayRunner, ReplaySession, ResponseRecorder
 from loopmaster.core.types import (
     Budget,
     CheckpointData,
+    Conditional,
     ErrorPolicy,
     InterruptionProtection,
     Loop,
@@ -28,6 +29,7 @@ __all__ = [
     "Loop",
     "Step",
     "Parallel",
+    "Conditional",
     "StepInput",
     "StepOutput",
     "StepResult",

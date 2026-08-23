@@ -63,6 +63,19 @@ def load_loop_def_object(py_file: Path) -> LoopDefType | None:
     return None
 
 
+def _format_step_or_block(item: Any) -> dict[str, Any]:
+    if hasattr(item, "to_dict"):
+        return dict(item.to_dict())
+    step_info: dict[str, Any] = {"name": getattr(item, "name", "step")}
+    for field in ("model", "tool", "prompt", "input", "retry", "timeout"):
+        val = getattr(item, field, None)
+        if val is not None:
+            step_info[field] = val
+    if getattr(item, "on_error", None):
+        step_info["on_error"] = item.on_error.to_dict()
+    return step_info
+
+
 def loop_def_to_dict(loop_def: LoopDefType, source_file: Path) -> dict[str, Any]:
     """Convert LoopDef to a serializable dict with full step info."""
     from loopmaster.core.context import Context
@@ -79,22 +92,7 @@ def loop_def_to_dict(loop_def: LoopDefType, source_file: Path) -> dict[str, Any]
         ctx._current_error_policy = None
         loop_def.body(ctx)
         for s in collected:
-            step_info: dict[str, Any] = {"name": s.name}
-            if s.model:
-                step_info["model"] = s.model
-            if s.tool:
-                step_info["tool"] = s.tool
-            if s.prompt:
-                step_info["prompt"] = s.prompt
-            if s.input is not None:
-                step_info["input"] = s.input
-            if s.retry is not None:
-                step_info["retry"] = s.retry
-            if s.timeout is not None:
-                step_info["timeout"] = s.timeout
-            if s.on_error:
-                step_info["on_error"] = s.on_error.to_dict()
-            steps.append(step_info)
+            steps.append(_format_step_or_block(s))
     except Exception as exc:
         logger.warning("Could not collect steps from %s: %s", loop_def.name, exc)
     finally:

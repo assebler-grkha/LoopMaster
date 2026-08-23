@@ -1,10 +1,10 @@
-"""LoopEngine — runtime that executes loop definitions.
+"""LoopEngine — runtime that executes loop definitions and conditional branches.
 
 The engine:
 1. Receives a @Loop-decorated function (LoopDef)
-2. Executes its body, intercepting Step() calls
+2. Executes its body, intercepting Step() and Conditional() calls
 3. Runs steps with error recovery, cost tracking, checkpoints
-4. Supports resume from checkpoint via executed_step_names
+4. Supports resume from checkpoint via executed_step_names and branch stickiness
 5. Interruption protection via heartbeats and pre/post checkpoints
 """
 
@@ -22,28 +22,23 @@ from ..cost.tracker import CostTracker
 from ..events import EventEmitter
 from ..metrics.collector import MetricsCollector
 from .context import Context
-from .exceptions import BudgetExceededError, InterruptedError, LoopError
+from .exceptions import BudgetExceededError, InterruptedError
 from .heartbeat import (
     HeartbeatState,
     start_heartbeat,
     stop_heartbeat,
 )
+from .runner import execute_traced_loop, run_step_block
 from .state import (
-    apply_step_result,
-    check_budget_limits,
     emit_loop_summary_event,
-    emit_step_completed_event,
     init_run_state,
-    make_checkpoint,
     save_observability_data,
 )
-from .step_executor import execute_step
 from .types import (
     Budget,
     CheckpointData,
     ErrorPolicy,
     InterruptionProtection,
-    Step,
     StepResult,
 )
 
@@ -52,11 +47,11 @@ logger = logging.getLogger(__name__)
 _local = threading.local()
 
 
-def _get_current_steps() -> list[Step] | None:
+def _get_current_steps() -> list[Any] | None:
     return getattr(_local, "steps", None)
 
 
-def _set_current_steps(steps: list[Step] | None) -> None:
+def _set_current_steps(steps: list[Any] | None) -> None:
     _local.steps = steps
 
 
@@ -115,77 +110,27 @@ class LoopEngine:
     def _collect_steps_from_loop(
         self,
         loop_def: Any,
-        ctx: Context,
+        ctx: Context | None,
         executed_steps: list[str],
         results: dict[str, StepResult],
-    ) -> list[Step]:
-        ctx._loop_engine = self
-        ctx._executed_steps = executed_steps
-        ctx._results = results
-        ctx._current_error_policy = self.error_policy
+    ) -> list[Any]:
+        effective_ctx = ctx if ctx is not None else Context({})
+        effective_ctx._loop_engine = self
+        effective_ctx._executed_steps = executed_steps
+        effective_ctx._results = results
+        effective_ctx._current_error_policy = self.error_policy
 
         if loop_def._collected_steps is not None:
             return list(loop_def._collected_steps)
 
-        collected_steps: list[Step] = []
-        _set_current_steps(collected_steps)
+        collected: list[Any] = []
+        _set_current_steps(collected)
         try:
-            loop_def.body(ctx)
+            loop_def.body(effective_ctx)
         finally:
             _set_current_steps(None)
-        loop_def._collected_steps = list(collected_steps)
-        return collected_steps
-
-    def _execute_single_step(
-        self,
-        loop_def: Any,
-        step: Step,
-        ctx: Context,
-        state: tuple[list[str], dict[str, StepResult]],
-        job_meta: tuple[str, int],
-    ) -> tuple[float, int]:
-        executed_steps, results = state
-        job_id, total_steps = job_meta
-        step_idx = len(executed_steps)
-        if self.event_emitter:
-            self.event_emitter.emit(
-                job_id=job_id,
-                event_type="step_started",
-                step_index=step_idx,
-                payload={
-                    "step_name": step.name,
-                    "model": step.model,
-                    "attempt": 1,
-                    "reset_buffer": True,
-                },
-            )
-
-        result = execute_step(
-            step=step,
-            context=ctx,
-            loop_def=loop_def,
-            error_policy=self.error_policy,
-            collector=self._collector,
-            llm_client=self._llm_client,
-            cost_tracker=self._cost_tracker,
-            event_emitter=self.event_emitter,
-            job_id=job_id,
-            step_index=step_idx,
-            total_steps=total_steps,
-        )
-
-        return apply_step_result(
-            loop_def=loop_def,
-            step=step,
-            result=result,
-            ctx=ctx,
-            executed_steps=executed_steps,
-            results=results,
-            heartbeat=self._heartbeat,
-            collector=self._collector,
-            cost_tracker=self._cost_tracker,
-            on_step_complete=self._on_step_complete,
-        )
+        loop_def._collected_steps = list(collected)
+        return collected
 
     def _run_steps_loop(
         self,
@@ -197,9 +142,7 @@ class LoopEngine:
     ) -> tuple[float, int]:
         collected_steps = self._collect_steps_from_loop(loop_def, ctx, executed_steps, results)
         total_steps = len(collected_steps)
-        total_cost: float = 0.0
-        total_tokens: int = 0
-        ip = self.interruption_protection
+        totals: list[Any] = [0.0, 0]
 
         if self.event_emitter:
             self.event_emitter.emit(
@@ -214,48 +157,23 @@ class LoopEngine:
                 },
             )
 
-        for step in collected_steps:
-            if step.name in executed_steps:
-                continue
+        from .runner import BlockExecContext
 
-            check_budget_limits(
-                self.budget,
-                loop_def,
-                ctx,
-                executed_steps,
-                results,
-                total_cost,
-                total_tokens,
-                self._heartbeat,
-                self.checkpoint_dir,
-            )
-            if ip and ip.enabled and ip.pre_step_checkpoint:
-                self._last_checkpoint = make_checkpoint(
-                    loop_def, ctx, executed_steps, results, self.checkpoint_dir
-                )
+        bctx = BlockExecContext(
+            engine=self,
+            loop_def=loop_def,
+            ctx=ctx,
+            executed_steps=executed_steps,
+            results=results,
+            job_id=job_id,
+            total_steps=total_steps,
+            totals=totals,
+        )
 
-            step_idx = len(executed_steps)
-            cost_added, tokens_added = self._execute_single_step(
-                loop_def, step, ctx, (executed_steps, results), (job_id, total_steps)
-            )
-            total_cost += cost_added
-            total_tokens += tokens_added
+        for block in collected_steps:
+            run_step_block(bctx, block)
 
-            emit_step_completed_event(
-                self.event_emitter,
-                job_id,
-                step,
-                results[step.name],
-                (step_idx, total_steps),
-                (total_cost, total_tokens),
-            )
-
-            if (ip and ip.enabled and ip.post_step_checkpoint) or (not ip or not ip.enabled):
-                self._last_checkpoint = make_checkpoint(
-                    loop_def, ctx, executed_steps, results, self.checkpoint_dir
-                )
-
-        return total_cost, total_tokens
+        return totals[0], totals[1]
 
     def _handle_loop_error(
         self, job_id: str, loop_name: str, step_count: int, exc: Exception
@@ -272,49 +190,6 @@ class LoopEngine:
                 step_index=step_count,
                 payload={"loop_name": loop_name, "error": str(exc)},
             )
-
-    def _execute_traced_loop(
-        self,
-        loop_def: Any,
-        ctx: Context,
-        state: tuple[list[str], dict[str, StepResult]],
-        job_meta: tuple[str, int, CheckpointData | None],
-    ) -> tuple[float, int, bool]:
-        executed_steps, results = state
-        effective_job_id, resume_cnt, resume_checkpoint = job_meta
-        from ..telemetry import SpanStatusCode, get_tracer
-
-        tracer = get_tracer()
-        with tracer.start_as_current_span(
-            f"loop.{loop_def.name}",
-            attributes={
-                "loopmaster.loop.name": loop_def.name,
-                "loopmaster.loop.version": loop_def.version,
-                "loopmaster.job_id": effective_job_id,
-                "loopmaster.resume_count": resume_cnt,
-            },
-        ) as loop_span:
-            try:
-                if resume_checkpoint is None:
-                    loop_def._collected_steps = None
-                total_cost, total_tokens = self._run_steps_loop(
-                    loop_def, ctx, executed_steps, results, effective_job_id
-                )
-                loop_span.set_attribute("loopmaster.total_cost", total_cost)
-                loop_span.set_attribute("loopmaster.total_tokens", total_tokens)
-                loop_span.set_attribute("loopmaster.steps_count", len(executed_steps))
-                return total_cost, total_tokens, False
-            except (BudgetExceededError, InterruptedError, LoopError) as exc:
-                loop_span.set_status(SpanStatusCode.ERROR, str(exc))
-                self._handle_loop_error(effective_job_id, loop_def.name, len(executed_steps), exc)
-                raise
-            except Exception as exc:
-                loop_span.set_status(SpanStatusCode.ERROR, str(exc))
-                self._handle_loop_error(effective_job_id, loop_def.name, len(executed_steps), exc)
-                self._last_checkpoint = make_checkpoint(
-                    loop_def, ctx, executed_steps, results, self.checkpoint_dir
-                )
-                raise InterruptedError(f"Loop '{loop_def.name}' interrupted: {exc}") from exc
 
     def run(
         self,
@@ -342,7 +217,8 @@ class LoopEngine:
             self._collector.start_loop(loop_def.name)
 
         try:
-            total_cost, total_tokens, interrupted = self._execute_traced_loop(
+            total_cost, total_tokens, interrupted = execute_traced_loop(
+                self,
                 loop_def,
                 ctx,
                 (executed_steps, results),
