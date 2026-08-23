@@ -2,7 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-362%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-374%20passing-brightgreen.svg)](#development)
 [![aislop](https://img.shields.io/badge/aislop-100%2F100%20healthy-brightgreen.svg)](#project-quality)
 
 **Production-grade runtime engine and orchestrator for AI agent loops.**
@@ -281,6 +281,44 @@ Step(
 - Strict Newline-Delimited JSON (NDJSON) framing with full MCP handshake.
 - Timeout protection using `ThreadPoolExecutor` and stderr deadlock prevention.
 - Emits `tool.mcp` OpenTelemetry client spans.
+
+### Model Registry & Semantic Aliases
+
+Decouple loop steps from hardcoded providers using semantic aliases:
+
+```python
+from loopmaster import Loop, Step, LoopEngine, ModelRegistry, ModelPolicy, ModelPolicyMode
+
+@Loop(name="portable-loop")
+def portable_loop(ctx):
+    Step("classify", model="@fast", prompt="Classify: {input}")
+    Step("code_gen", model="@coding", prompt="Write solution for: {classify}")
+    Step("deep_audit", model="@smart", prompt="Audit code: {code_gen}")
+    return ctx
+
+# Configure registry & policies
+registry = ModelRegistry()
+engine = LoopEngine(
+    model_registry=registry,
+    model_policy=ModelPolicy(
+        mode=ModelPolicyMode.STRICT,      # Enforce approved models only
+        max_cost_per_step=0.25,           # Prevent accidental massive prompt spend
+        default_alias="@fast",
+    ),
+)
+```
+
+| Semantic Alias | Recommended For | Default Resolved Model |
+|---|---|---|
+| `@fast` | Classification, extraction, routing, simple JSON | `gpt-4o-mini` |
+| `@smart` | Complex reasoning, architecture, deep audits | `gpt-4o` |
+| `@coding` | Code generation, refactoring, test writing | `claude-3-5-sonnet` |
+| `@cheap` | Background batch jobs, log parsing | `gemini-1.5-flash` |
+| `@reasoning` | STEM / algorithmic problem solving | `o1-mini` |
+| `@fallback` | Resilient recovery model for error policies | `gpt-4o-mini` |
+| `@auto` | Dynamically auto-routed based on prompt size & budget | Adaptive |
+
+See [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) for full AI agent guidelines.
 
 ### Error Recovery & Policies
 

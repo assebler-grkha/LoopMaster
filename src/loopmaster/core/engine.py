@@ -85,6 +85,8 @@ class LoopEngine:
         llm_client: Any = None,
         event_emitter: EventEmitter | None = None,
         compatibility_policy: Any = None,
+        model_registry: Any = None,
+        model_policy: Any = None,
     ) -> None:
         self.error_policy = error_policy or ErrorPolicy()
         self.budget = budget
@@ -95,6 +97,8 @@ class LoopEngine:
         self._llm_client = llm_client
         self.event_emitter = event_emitter
         self.compatibility_policy = compatibility_policy
+        self.model_registry = model_registry
+        self.model_policy = model_policy
         self._registry: dict[str, Any] = {}
         self._on_step_complete: Callable[[StepResult], None] | None = None
         self._heartbeat: HeartbeatState | None = None

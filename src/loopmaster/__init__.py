@@ -29,6 +29,15 @@ from loopmaster.executors import (
     ShellExecutor,
     ShellResult,
 )
+from loopmaster.models import (
+    ModelPolicy,
+    ModelPolicyMode,
+    ModelRecommendation,
+    ModelRegistry,
+    ModelSpec,
+    auto_route_model,
+    get_default_registry,
+)
 
 __version__ = "0.1.0"
 
@@ -44,6 +53,13 @@ __all__ = [
     "HTTPResult",
     "MCPToolExecutor",
     "MCPToolResult",
+    "ModelSpec",
+    "ModelPolicy",
+    "ModelPolicyMode",
+    "ModelRecommendation",
+    "ModelRegistry",
+    "get_default_registry",
+    "auto_route_model",
     "StepInput",
     "StepOutput",
     "StepResult",

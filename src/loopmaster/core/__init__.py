@@ -5,8 +5,10 @@ from loopmaster.core.exceptions import (
     CheckpointError,
     InterruptedError,
     LoopError,
+    ModelPolicyError,
     ReplayError,
     StepError,
+    UnapprovedModelError,
 )
 from loopmaster.core.replay import ReplayRunner, ReplaySession, ResponseRecorder
 from loopmaster.core.types import (
@@ -43,6 +45,8 @@ __all__ = [
     "CheckpointError",
     "BudgetExceededError",
     "InterruptedError",
+    "ModelPolicyError",
+    "UnapprovedModelError",
     "ReplayError",
     "LoopEngine",
     "LoopRunResult",

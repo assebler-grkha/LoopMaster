@@ -43,3 +43,11 @@ class InterruptedError(LoopError):
 
 class ReplayError(LoopError):
     """Raised when deterministic replay fails."""
+
+
+class ModelPolicyError(LoopError):
+    """Raised when a model violates configured ModelPolicy rules."""
+
+
+class UnapprovedModelError(ModelPolicyError):
+    """Raised when attempting to execute a model that is not approved."""

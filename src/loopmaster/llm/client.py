@@ -106,11 +106,30 @@ class LLMClient:
                 "No LLM API key configured. Set LOOPMASTER_LLM_API_KEY or provider-specific key."
             )
         if model_override and model_override != self.config.model:
+            import os
+
+            from ..models import get_default_registry
+            from .types import get_base_url
+
+            spec = get_default_registry().resolve(model_override)
+            target_provider = (
+                spec.provider if spec.provider not in ("custom", "local") else self.config.provider
+            )
+            target_key = (
+                os.getenv(spec.api_key_env or "") if spec.api_key_env else self.config.api_key
+            )
+            target_key = target_key or self.config.api_key
+            target_url = spec.base_url or (
+                get_base_url(target_provider)
+                if target_provider != self.config.provider
+                else self.config.base_url
+            )
+
             return LLMConfig(
-                provider=self.config.provider,
-                api_key=self.config.api_key,
-                base_url=self.config.base_url,
-                model=model_override,
+                provider=target_provider,
+                api_key=target_key,
+                base_url=target_url,
+                model=spec.name,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 timeout=self.config.timeout,

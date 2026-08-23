@@ -120,3 +120,34 @@ def load_loop_def(py_file: Path) -> dict[str, Any] | None:
     if loop_def is not None:
         return loop_def_to_dict(loop_def, py_file)
     return None
+
+
+def get_error_policy(loop_def: dict[str, Any], step_name: str) -> dict[str, Any]:
+    """Get error policy for a step."""
+    for step in loop_def.get("steps", []):
+        if step.get("name") == step_name and "on_error" in step:
+            res: dict[str, Any] = step["on_error"]
+            return res
+    return {"retry": 2, "on_failure": "abort"}
+
+
+def get_recovery_suggestion(policy: dict[str, Any], error: str) -> str:
+    """Suggest recovery action based on error policy."""
+    action = policy.get("on_failure", "abort")
+    retry = policy.get("retry", 2)
+    if action == "retry":
+        return f"Retry the step (up to {retry} times). Error: {error}"
+    if action == "skip":
+        return f"Skip this step and continue. Error: {error}"
+    if action == "fallback":
+        fb = policy.get("fallback_model", "a different model")
+        return f"Retry with {fb}. Error: {error}"
+    return f"Abort the loop. Error: {error}"
+
+
+def build_summary(results: dict[str, Any]) -> str:
+    """Build execution summary from results dict."""
+    total = len(results)
+    succeeded = sum(1 for r in results.values() if r.get("success"))
+    failed = total - succeeded
+    return f"Completed {succeeded}/{total} steps" + (f" ({failed} failed)" if failed else "")

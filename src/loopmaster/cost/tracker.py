@@ -58,9 +58,13 @@ class CostTracker:
         self._budget_limit = max_cost
 
     def calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
-        """Calculate cost for a model call."""
-        rates = self._pricing.get(model, {"input": 0.001 / 1000, "output": 0.003 / 1000})
-        return input_tokens * rates["input"] + output_tokens * rates["output"]
+        """Calculate cost for a model call using ModelRegistry or custom pricing."""
+        if model in self._pricing:
+            rates = self._pricing[model]
+            return input_tokens * rates["input"] + output_tokens * rates["output"]
+        from ..models import get_default_registry
+
+        return get_default_registry().calculate_cost(model, input_tokens, output_tokens)
 
     def record(
         self,

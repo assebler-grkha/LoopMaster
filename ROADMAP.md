@@ -95,6 +95,16 @@ opencode (агент)                    MCP-сервер LoopMaster
 - Рекурсивная шаблонизация переменных с поддержкой dot-notation (`{step.stdout}`, `{http.body.user.id}`) и сохранением структуры данных в контексте
 - Автоматическая OTel-инструментация с `SpanKind.CLIENT` (`tool.shell`, `tool.http`, `tool.mcp`)
 
+#### ✅ Model Registry, Semantic Aliases & Intelligent Policy
+- Централизованный каталог моделей `ModelRegistry` со встроенными тарифами, контекстными окнами и тегами
+- Семантические алиасы (`@fast`, `@smart`, `@coding`, `@cheap`, `@reasoning`, `@fallback`, `@auto`) для создания вендор-агностичных циклов
+- Политики `ModelPolicy` с режимами `PERMISSIVE`, `STRICT` (запрет неодобренных моделей) и `ALIAS_ONLY`
+- Потолковые лимиты `max_cost_per_step` для предотвращения случайных перерасходов на длинных промптах
+- Интеллектуальный эвристический роутер `auto_route_model` на основе анализа сложности задачи и остатка бюджета
+- Мульти-провайдерное динамическое переключение в `LLMClient` (OpenAI, Anthropic, Google Gemini, Local/Ollama) с SSOT тарификацией в `CostTracker`
+- MCP-инструменты `model_list` (без утечки секретов) и `model_recommend`
+- Официальное руководство для AI-агентов [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md)
+
 #### Loop marketplace
 Registry/pypi для loop definitions.
 

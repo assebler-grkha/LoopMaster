@@ -27,12 +27,22 @@ from loopmaster.core.types import LoopDef as LoopDefType
 from loopmaster.cost.tracker import CostTracker
 from loopmaster.llm import LLMClient, get_llm_config
 from loopmaster.mcp.discovery import (
+    build_summary as _build_summary,
+)
+from loopmaster.mcp.discovery import (
     find_loop_files,
     load_loop_def,
     load_loop_def_object,
     loop_def_to_dict,
 )
+from loopmaster.mcp.discovery import (
+    get_error_policy as _get_error_policy,
+)
+from loopmaster.mcp.discovery import (
+    get_recovery_suggestion as _get_recovery_suggestion,
+)
 from loopmaster.mcp.job_store import get_job_store
+from loopmaster.mcp.models_tools import handle_model_list, handle_model_recommend
 from loopmaster.metrics.collector import MetricsCollector
 
 # Backwards-compatible aliases for private helpers
@@ -359,38 +369,18 @@ def loop_run(
     return _handle_run_completion(run_result, job_id, loop_name, config, duration_ms)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+@mcp.tool()
+def model_list() -> str:
+    """List all registered and approved LLM models, semantic aliases, and pricing."""
+    return json.dumps(handle_model_list(), indent=2)
 
 
-def _get_error_policy(loop_def: dict[str, Any], step_name: str) -> dict[str, Any]:
-    """Get error policy for a step."""
-    for step in loop_def.get("steps", []):
-        if step["name"] == step_name and "on_error" in step:
-            res: dict[str, Any] = step["on_error"]
-            return res
-    return {"retry": 2, "on_failure": "abort"}
-
-
-def _get_recovery_suggestion(policy: dict[str, Any], error: str) -> str:
-    """Suggest recovery action based on error policy."""
-    action = policy.get("on_failure", "abort")
-    retry = policy.get("retry", 2)
-    if action == "retry":
-        return f"Retry the step (up to {retry} times). Error: {error}"
-    if action == "skip":
-        return f"Skip this step and continue. Error: {error}"
-    if action == "fallback":
-        fb = policy.get("fallback_model", "a different model")
-        return f"Retry with {fb}. Error: {error}"
-    return f"Abort the loop. Error: {error}"
-
-
-def _build_summary(results: dict[str, Any]) -> str:
-    """Build execution summary from results dict."""
-    total = len(results)
-    succeeded = sum(1 for r in results.values() if r.get("success"))
-    failed = total - succeeded
-    return f"Completed {succeeded}/{total} steps" + (f" ({failed} failed)" if failed else "")
+@mcp.tool()
+def model_recommend(
+    task: str = "", prompt_tokens: int = 0, remaining_budget: float | None = None
+) -> str:
+    """Recommend the optimal approved model based on task complexity and budget constraints."""
+    return json.dumps(handle_model_recommend(task, prompt_tokens, remaining_budget), indent=2)
 
 
 if __name__ == "__main__":
