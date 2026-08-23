@@ -8,6 +8,8 @@ import operator
 from collections.abc import Callable
 from typing import Any
 
+from .types import resolve_prompt
+
 logger = logging.getLogger("loopmaster.core.condition")
 
 _OPERATORS: dict[type[ast.AST], Callable[[Any, Any], bool]] = {
@@ -83,7 +85,7 @@ def evaluate_condition(
             if hasattr(ctx, "to_dict")
             else (dict(ctx) if isinstance(ctx, dict) else {})
         )
-        cond_str = condition.strip()
+        cond_str = resolve_prompt(condition.strip(), ctx_data)
         if not cond_str:
             return False
 
