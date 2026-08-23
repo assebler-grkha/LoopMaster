@@ -196,3 +196,39 @@ class MetricsCollector:
             )
         for name, m_data in data.get("loops", {}).items():
             self._loops[name] = LoopMetrics.from_dict(m_data)
+
+    def to_otlp_payload(self, service_name: str = "loopmaster") -> dict[str, Any]:
+        """Convert collected metrics to standard OpenTelemetry OTLP/HTTP JSON metric format."""
+        metrics_list: list[dict[str, Any]] = []
+        for p in self._points:
+            ts_nano = str(int(p.timestamp * 1_000_000_000))
+            attrs = [{"key": k, "value": {"stringValue": str(v)}} for k, v in p.tags.items()]
+            dp: dict[str, Any] = {
+                "timeUnixNano": ts_nano,
+                "asDouble": float(p.value),
+                "attributes": attrs,
+            }
+            metrics_list.append(
+                {
+                    "name": p.name,
+                    "gauge": {"dataPoints": [dp]},
+                }
+            )
+
+        return {
+            "resourceMetrics": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": service_name}}
+                        ]
+                    },
+                    "scopeMetrics": [
+                        {
+                            "scope": {"name": "loopmaster", "version": "1.0.0"},
+                            "metrics": metrics_list,
+                        }
+                    ],
+                }
+            ]
+        }

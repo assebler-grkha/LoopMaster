@@ -70,8 +70,13 @@ opencode (агент)                    MCP-сервер LoopMaster
 - Транзакционное глубокое копирование `deepcopy` перед миграцией и синхронизация переименований шагов `rename_checkpoint_step`
 - Прозрачная интеграция в `LoopEngine.run` и `CheckpointManager.load_and_migrate`
 
-#### ⏳ OpenTelemetry интеграция
-**Проблема:** `MetricsCollector` сохраняет кастомный JSON, отсутствует стандартный экспорт трейсов и спанов (OTEL/OTLP) для Grafana/Jaeger/Datadog.
+#### ✅ OpenTelemetry интеграция
+- Встроенная легковесная подсистема OpenTelemetry-трассировки и метрик (`src/loopmaster/telemetry`) без обязательных сторонних зависимостей
+- Формат экспорта OTLP Proto3 JSON (`/v1/traces`, `/v1/metrics`) с наносекундными временными метками и типизированными атрибутами
+- Асинхронная изоляция через `ContextVar` с поддержкой W3C `traceparent` (`00-{trace_id}-{span_id}-{flags}`)
+- Неблокирующий фоновый экспортер `OTLPHttpSpanExporter` с bounded queue, батчингом и отказоустойчивостью к сбоям сети
+- Сквозная инструментация `LoopEngine` (root `loop.<name>`), `StepExecutor` (internal `step.<name>`), и LLM вызовов (client `llm.<model>` с GenAI семантическими конвенциями)
+- Поддержка экспорта метрик `MetricsCollector.to_otlp_payload` в OTLP `ResourceMetrics`
 
 ### P2: Желаемые (1-2 месяца)
 

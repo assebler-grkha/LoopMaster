@@ -257,6 +257,65 @@ class LoopEngine:
 
         return total_cost, total_tokens
 
+    def _handle_loop_error(
+        self, job_id: str, loop_name: str, step_count: int, exc: Exception
+    ) -> None:
+        if self.event_emitter:
+            ev_type = (
+                "loop_interrupted"
+                if isinstance(exc, (BudgetExceededError, InterruptedError))
+                else "loop_failed"
+            )
+            self.event_emitter.emit(
+                job_id=job_id,
+                event_type=ev_type,
+                step_index=step_count,
+                payload={"loop_name": loop_name, "error": str(exc)},
+            )
+
+    def _execute_traced_loop(
+        self,
+        loop_def: Any,
+        ctx: Context,
+        state: tuple[list[str], dict[str, StepResult]],
+        job_meta: tuple[str, int, CheckpointData | None],
+    ) -> tuple[float, int, bool]:
+        executed_steps, results = state
+        effective_job_id, resume_cnt, resume_checkpoint = job_meta
+        from ..telemetry import SpanStatusCode, get_tracer
+
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            f"loop.{loop_def.name}",
+            attributes={
+                "loopmaster.loop.name": loop_def.name,
+                "loopmaster.loop.version": loop_def.version,
+                "loopmaster.job_id": effective_job_id,
+                "loopmaster.resume_count": resume_cnt,
+            },
+        ) as loop_span:
+            try:
+                if resume_checkpoint is None:
+                    loop_def._collected_steps = None
+                total_cost, total_tokens = self._run_steps_loop(
+                    loop_def, ctx, executed_steps, results, effective_job_id
+                )
+                loop_span.set_attribute("loopmaster.total_cost", total_cost)
+                loop_span.set_attribute("loopmaster.total_tokens", total_tokens)
+                loop_span.set_attribute("loopmaster.steps_count", len(executed_steps))
+                return total_cost, total_tokens, False
+            except (BudgetExceededError, InterruptedError, LoopError) as exc:
+                loop_span.set_status(SpanStatusCode.ERROR, str(exc))
+                self._handle_loop_error(effective_job_id, loop_def.name, len(executed_steps), exc)
+                raise
+            except Exception as exc:
+                loop_span.set_status(SpanStatusCode.ERROR, str(exc))
+                self._handle_loop_error(effective_job_id, loop_def.name, len(executed_steps), exc)
+                self._last_checkpoint = make_checkpoint(
+                    loop_def, ctx, executed_steps, results, self.checkpoint_dir
+                )
+                raise InterruptedError(f"Loop '{loop_def.name}' interrupted: {exc}") from exc
+
     def run(
         self,
         loop_def: Any,
@@ -271,7 +330,6 @@ class LoopEngine:
             compatibility_policy=self.compatibility_policy,
         )
         self._resume_count = resume_cnt
-        total_cost, total_tokens, interrupted = 0.0, 0, False
         ip = self.interruption_protection
         effective_job_id = job_id or f"{loop_def.name}_{int(time.time())}"
 
@@ -284,38 +342,12 @@ class LoopEngine:
             self._collector.start_loop(loop_def.name)
 
         try:
-            if resume_checkpoint is None:
-                loop_def._collected_steps = None
-            total_cost, total_tokens = self._run_steps_loop(
-                loop_def, ctx, executed_steps, results, effective_job_id
+            total_cost, total_tokens, interrupted = self._execute_traced_loop(
+                loop_def,
+                ctx,
+                (executed_steps, results),
+                (effective_job_id, resume_cnt, resume_checkpoint),
             )
-        except (BudgetExceededError, InterruptedError, LoopError) as exc:
-            if self.event_emitter:
-                ev_type = (
-                    "loop_interrupted"
-                    if isinstance(exc, (BudgetExceededError, InterruptedError))
-                    else "loop_failed"
-                )
-                self.event_emitter.emit(
-                    job_id=effective_job_id,
-                    event_type=ev_type,
-                    step_index=len(executed_steps),
-                    payload={"loop_name": loop_def.name, "error": str(exc)},
-                )
-            raise
-        except Exception as exc:
-            interrupted = True
-            if self.event_emitter:
-                self.event_emitter.emit(
-                    job_id=effective_job_id,
-                    event_type="loop_interrupted",
-                    step_index=len(executed_steps),
-                    payload={"loop_name": loop_def.name, "error": str(exc)},
-                )
-            self._last_checkpoint = make_checkpoint(
-                loop_def, ctx, executed_steps, results, self.checkpoint_dir
-            )
-            raise InterruptedError(f"Loop '{loop_def.name}' interrupted: {exc}") from exc
         finally:
             if self._heartbeat:
                 stop_heartbeat(self._heartbeat)

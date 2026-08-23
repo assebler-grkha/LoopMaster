@@ -123,22 +123,42 @@ def _run_step_once(
     start = time.monotonic()
     try:
         resolved_prompt = resolve_prompt(step.prompt or "", ctx_data)
+        from ..telemetry import SpanKind, get_tracer
 
-        if event_emitter and hasattr(llm_client, "stream_complete"):
-            return _run_streaming_step(
-                step=step,
-                resolved_prompt=resolved_prompt,
-                llm_client=llm_client,
-                cost_tracker=cost_tracker,
-                event_context=(event_emitter, job_id, step_index),
-            )
+        tracer = get_tracer()
+        model_name = step.model or "default"
+        provider = getattr(getattr(llm_client, "config", None), "provider", "custom")
 
-        return _run_sync_step(
-            step=step,
-            resolved_prompt=resolved_prompt,
-            llm_client=llm_client,
-            cost_tracker=cost_tracker,
-        )
+        with tracer.start_as_current_span(
+            f"llm.{model_name}",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.request.model": model_name,
+                "gen_ai.operation.name": "chat",
+                "gen_ai.system": str(provider),
+            },
+        ) as llm_span:
+            if event_emitter and hasattr(llm_client, "stream_complete"):
+                res = _run_streaming_step(
+                    step=step,
+                    resolved_prompt=resolved_prompt,
+                    llm_client=llm_client,
+                    cost_tracker=cost_tracker,
+                    event_context=(event_emitter, job_id, step_index),
+                )
+            else:
+                res = _run_sync_step(
+                    step=step,
+                    resolved_prompt=resolved_prompt,
+                    llm_client=llm_client,
+                    cost_tracker=cost_tracker,
+                )
+
+            llm_span.set_attribute("gen_ai.response.model", res.model)
+            llm_span.set_attribute("gen_ai.usage.input_tokens", res.input_tokens)
+            llm_span.set_attribute("gen_ai.usage.output_tokens", res.output_tokens)
+            llm_span.set_attribute("gen_ai.usage.cost", res.cost)
+            return res
     except Exception as exc:
         duration = (time.monotonic() - start) * 1000
         return StepResult(
@@ -163,24 +183,54 @@ def execute_step(
     step_index: int = 0,
     total_steps: int = 0,
 ) -> StepResult:
-    """Execute a step with retry/backoff/skip/fallback logic.
+    """Execute a step with retry/backoff/skip/fallback logic."""
+    from ..telemetry import SpanKind, SpanStatusCode, get_tracer
 
-    Args:
-        step: The Step to execute.
-        context: Current loop context.
-        loop_def: The loop definition being executed.
-        error_policy: ErrorPolicy for recovery decisions.
-        collector: Optional MetricsCollector for retry recording.
-        llm_client: Optional LLMClient for executing prompt/model steps.
-        cost_tracker: Optional CostTracker for calculating step cost.
-        event_emitter: Optional EventEmitter for real-time lifecycle and chunk events.
-        job_id: Unique loop execution ID.
-        step_index: Current step index (0-based).
-        total_steps: Total steps count.
+    tracer = get_tracer()
+    with tracer.start_as_current_span(
+        f"step.{step.name}",
+        kind=SpanKind.INTERNAL,
+        attributes={
+            "loopmaster.step.name": step.name,
+            "loopmaster.step.model": step.model or "",
+            "loopmaster.step.index": step_index,
+        },
+    ) as span:
+        result = _execute_step_retries(
+            step=step,
+            context=context,
+            loop_def=loop_def,
+            error_policy=error_policy,
+            collector=collector,
+            llm_client=llm_client,
+            cost_tracker=cost_tracker,
+            event_emitter=event_emitter,
+            job_id=job_id,
+            step_index=step_index,
+            total_steps=total_steps,
+        )
+        span.set_attribute("loopmaster.step.success", result.success)
+        span.set_attribute("loopmaster.step.cost", result.cost)
+        span.set_attribute("loopmaster.step.tokens", result.tokens_used)
+        if not result.success and result.error:
+            span.set_status(SpanStatusCode.ERROR, result.error)
+        return result
 
-    Returns:
-        StepResult with success/failure status.
-    """
+
+def _execute_step_retries(
+    step: Step,
+    context: Context,
+    loop_def: Any,
+    error_policy: Any,
+    collector: Any = None,
+    llm_client: Any = None,
+    cost_tracker: Any = None,
+    event_emitter: Any = None,
+    job_id: str = "",
+    step_index: int = 0,
+    total_steps: int = 0,
+) -> StepResult:
+    """Execute retry loop for a step."""
     ctx_policy = step.on_error or getattr(context, "_current_error_policy", error_policy)
     step_retries = step.retry if step.retry is not None else (ctx_policy.retry if ctx_policy else 1)
     max_retries = step_retries if step_retries > 0 else 1
