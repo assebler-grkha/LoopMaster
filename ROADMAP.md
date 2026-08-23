@@ -109,11 +109,11 @@ Registry/pypi для loop definitions.
 - ⏳ Publish to PyPI
 
 **Фаза 2: Differentiate (2-4 месяца)**
-- Streaming progress (SSE)
-- Loop versioning и migration
-- OpenTelemetry integration
-- Conditional branching в DSL
-- 5+ production-ready templates
+- ✅ Streaming progress (SSE & Real-time events)
+- ⏳ Loop versioning и migration
+- ⏳ OpenTelemetry integration
+- ⏳ Conditional branching в DSL
+- ⏳ 5+ production-ready templates
 
 **Фаза 3: Scale (4-6 месяцев)**
 - Tool execution bridge (Shell/HTTP/MCP)
@@ -128,6 +128,6 @@ Registry/pypi для loop definitions.
 3. ✅ SQLite persistence для jobs (JobStore)
 4. ✅ Safe prompt resolution
 5. ✅ Unify engines (LoopEngine)
-6. ⏳ Streaming progress (SSE)
-7. ⏳ Loop versioning
+6. ✅ Streaming progress (SSE & Real-time events)
+7. ⏳ Loop versioning & migration
 8. ⏳ OpenTelemetry

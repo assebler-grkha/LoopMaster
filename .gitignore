@@ -9,9 +9,6 @@ build/
 .pytest_cache/
 *.egg
 theme
-loops/
-tests/
-ROADMAP.md
 .env
 docs/USAGE.md
 .loopmaster/

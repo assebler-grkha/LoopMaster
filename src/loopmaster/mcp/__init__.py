@@ -129,15 +129,21 @@ class LoopProtocol:
 
     async def subscribe_events(self, job_id: str) -> AsyncIterator[LoopEvent]:
         """Subscribe to real-time events for a job."""
-        queue: asyncio.Queue[LoopEvent] = asyncio.Queue()
-        if job_id in self._event_queues:
-            self._event_queues[job_id].append(queue)
+        queue: asyncio.Queue[LoopEvent] = asyncio.Queue(maxsize=500)
+        self._event_queues.setdefault(job_id, []).append(queue)
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
                     yield event
-                    if event.event_type in ("completed", "failed", "cancelled"):
+                    if event.event_type in (
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "loop_completed",
+                        "loop_failed",
+                        "loop_cancelled",
+                    ):
                         break
                 except TimeoutError:
                     job = self._jobs.get(job_id)
@@ -147,6 +153,8 @@ class LoopProtocol:
             if job_id in self._event_queues:
                 with contextlib.suppress(ValueError):
                     self._event_queues[job_id].remove(queue)
+                if not self._event_queues[job_id]:
+                    del self._event_queues[job_id]
 
     def _emit_event(
         self,
@@ -156,7 +164,7 @@ class LoopProtocol:
         metrics: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        """Emit an event to all subscribers."""
+        """Emit an event to all subscribers in a thread-safe manner."""
         job = self._jobs.get(job_id)
         if not job:
             return
@@ -169,9 +177,22 @@ class LoopProtocol:
             payload=payload or {},
         )
         job.events.append(event)
-        for q in self._event_queues.get(job_id, []):
-            with contextlib.suppress(asyncio.QueueFull):
-                q.put_nowait(event)
+        for q in list(self._event_queues.get(job_id, [])):
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    loop.call_soon_threadsafe(self._safe_enqueue, q, event)
+                else:
+                    with contextlib.suppress(asyncio.QueueFull):
+                        q.put_nowait(event)
+            except RuntimeError:
+                with contextlib.suppress(asyncio.QueueFull):
+                    q.put_nowait(event)
+
+    @staticmethod
+    def _safe_enqueue(target_q: asyncio.Queue[LoopEvent], ev: LoopEvent) -> None:
+        if not target_q.full():
+            target_q.put_nowait(ev)
 
 
 class MCPServer:

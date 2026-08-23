@@ -1,14 +1,24 @@
-"""Events module — LoopEvent schema and EventEmitter."""
+"""Events module — LoopEvent schema, EventEmitter, and SSE streaming."""
 
 from __future__ import annotations
 
+import collections
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .sse import SSEStream, format_sse
+
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "LoopEvent",
+    "EventEmitter",
+    "format_sse",
+    "SSEStream",
+]
 
 
 @dataclass
@@ -24,11 +34,11 @@ class LoopEvent:
 
 
 class EventEmitter:
-    """Collects and dispatches loop events to subscribers."""
+    """Collects and dispatches loop events to subscribers with bounded history."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_history: int = 500) -> None:
         self._listeners: dict[str, list[Callable[[LoopEvent], None]]] = {}
-        self._history: list[LoopEvent] = []
+        self._history: collections.deque[LoopEvent] = collections.deque(maxlen=max_history)
 
     def on(self, event_type: str, callback: Callable[[LoopEvent], None]) -> None:
         """Register a callback for an event type. Use '*' for all events."""
@@ -58,7 +68,9 @@ class EventEmitter:
             metrics_snapshot=metrics or {},
             payload=payload or {},
         )
-        self._history.append(event)
+        # Exclude high-frequency transient streaming tokens from persistent history
+        if event_type != "step_chunk":
+            self._history.append(event)
         self._dispatch(event)
         return event
 
@@ -77,7 +89,7 @@ class EventEmitter:
 
     @property
     def history(self) -> list[LoopEvent]:
-        """All emitted events."""
+        """All emitted lifecycle events."""
         return list(self._history)
 
     def clear(self) -> None:

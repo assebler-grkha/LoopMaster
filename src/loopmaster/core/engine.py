@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..cost.tracker import CostTracker
+from ..events import EventEmitter
 from ..metrics.collector import MetricsCollector
 from .context import Context
 from .exceptions import BudgetExceededError, InterruptedError, LoopError
@@ -62,24 +64,25 @@ class LoopRunResult:
     total_tokens: int
     steps_executed: list[str]
     error: str | None = None
-    checkpoint_saved: bool = False
     interrupted: bool = False
     resume_count: int = 0
     last_checkpoint: CheckpointData | None = None
+    checkpoint_saved: bool = False
 
 
 class LoopEngine:
-    """Runtime engine for executing loop definitions."""
+    """Executes a loop definition with error recovery, cost tracking, and checkpoints."""
 
     def __init__(
         self,
         error_policy: ErrorPolicy | None = None,
         budget: Budget | None = None,
         interruption_protection: InterruptionProtection | None = None,
-        checkpoint_dir: str | None = None,
+        checkpoint_dir: str | Path | None = None,
         metrics_collector: MetricsCollector | None = None,
         cost_tracker: CostTracker | None = None,
         llm_client: Any = None,
+        event_emitter: EventEmitter | None = None,
     ) -> None:
         self.error_policy = error_policy or ErrorPolicy()
         self.budget = budget
@@ -88,6 +91,7 @@ class LoopEngine:
         self._collector = metrics_collector
         self._cost_tracker = cost_tracker
         self._llm_client = llm_client
+        self.event_emitter = event_emitter
         self._registry: dict[str, Any] = {}
         self._on_step_complete: Callable[[StepResult], None] | None = None
         self._heartbeat: HeartbeatState | None = None
@@ -315,11 +319,13 @@ class LoopEngine:
         loop_def: Any,
         initial_context: dict[str, Any] | None = None,
         resume_checkpoint: CheckpointData | None = None,
+        job_id: str | None = None,
     ) -> LoopRunResult:
         self._resume_count = 0
         ctx, executed_steps, results = self._init_run_state(initial_context, resume_checkpoint)
         total_cost, total_tokens, interrupted = 0.0, 0, False
         ip = self.interruption_protection
+        effective_job_id = job_id or f"{loop_def.name}_{int(time.time())}"
 
         if ip and ip.enabled:
             self._heartbeat = HeartbeatState()
@@ -336,6 +342,20 @@ class LoopEngine:
             if resume_checkpoint is None:
                 loop_def._collected_steps = None
             collected_steps = self._collect_steps_from_loop(loop_def, ctx, executed_steps, results)
+            total_steps = len(collected_steps)
+
+            if self.event_emitter:
+                self.event_emitter.emit(
+                    job_id=effective_job_id,
+                    event_type="loop_started",
+                    step_index=0,
+                    payload={
+                        "loop_name": loop_def.name,
+                        "version": loop_def.version,
+                        "total_steps": total_steps,
+                        "budget": self.budget.to_dict() if self.budget else None,
+                    },
+                )
 
             for step in collected_steps:
                 if step.name in executed_steps:
@@ -348,6 +368,20 @@ class LoopEngine:
                 if ip and ip.enabled and ip.pre_step_checkpoint:
                     self._make_checkpoint(loop_def, ctx, executed_steps, results)
 
+                step_idx = len(executed_steps)
+                if self.event_emitter:
+                    self.event_emitter.emit(
+                        job_id=effective_job_id,
+                        event_type="step_started",
+                        step_index=step_idx,
+                        payload={
+                            "step_name": step.name,
+                            "model": step.model,
+                            "attempt": 1,
+                            "reset_buffer": True,
+                        },
+                    )
+
                 result = execute_step(
                     step=step,
                     context=ctx,
@@ -356,6 +390,10 @@ class LoopEngine:
                     collector=self._collector,
                     llm_client=self._llm_client,
                     cost_tracker=self._cost_tracker,
+                    event_emitter=self.event_emitter,
+                    job_id=effective_job_id,
+                    step_index=step_idx,
+                    total_steps=total_steps,
                 )
 
                 cost_added, tokens_added = self._apply_step_result(
@@ -364,18 +402,65 @@ class LoopEngine:
                 total_cost += cost_added
                 total_tokens += tokens_added
 
+                progress = min(1.0, round(len(executed_steps) / max(1, total_steps), 2))
+                if self.event_emitter:
+                    self.event_emitter.emit(
+                        job_id=effective_job_id,
+                        event_type="step_completed" if result.success else "step_failed",
+                        step_index=step_idx,
+                        metrics={
+                            "tokens_used": result.tokens_used,
+                            "cost": result.cost,
+                            "duration_ms": result.duration_ms,
+                            "total_cost": total_cost,
+                            "total_tokens": total_tokens,
+                        },
+                        payload={
+                            "step_name": step.name,
+                            "success": result.success,
+                            "output": (
+                                result.output.updates
+                                if isinstance(result.output, StepOutput)
+                                else result.output
+                            ),
+                            "error": result.error,
+                            "progress": progress,
+                        },
+                    )
+
                 should_checkpoint = (ip and ip.enabled and ip.post_step_checkpoint) or (
                     not ip or not ip.enabled
                 )
                 if should_checkpoint:
                     self._make_checkpoint(loop_def, ctx, executed_steps, results)
 
-        except (BudgetExceededError, InterruptedError):
+        except (BudgetExceededError, InterruptedError) as exc:
+            if self.event_emitter:
+                self.event_emitter.emit(
+                    job_id=effective_job_id,
+                    event_type="loop_interrupted",
+                    step_index=len(executed_steps),
+                    payload={"loop_name": loop_def.name, "error": str(exc)},
+                )
             raise
-        except LoopError:
+        except LoopError as exc:
+            if self.event_emitter:
+                self.event_emitter.emit(
+                    job_id=effective_job_id,
+                    event_type="loop_failed",
+                    step_index=len(executed_steps),
+                    payload={"loop_name": loop_def.name, "error": str(exc)},
+                )
             raise
         except Exception as exc:
             interrupted = True
+            if self.event_emitter:
+                self.event_emitter.emit(
+                    job_id=effective_job_id,
+                    event_type="loop_interrupted",
+                    step_index=len(executed_steps),
+                    payload={"loop_name": loop_def.name, "error": str(exc)},
+                )
             self._make_checkpoint(loop_def, ctx, executed_steps, results)
             raise InterruptedError(f"Loop '{loop_def.name}' interrupted: {exc}") from exc
         finally:
@@ -392,6 +477,40 @@ class LoopEngine:
                 if not r.success and r.error is not None:
                     first_error = r.error
                     break
+
+        if self.event_emitter:
+            if all_succeeded:
+                self.event_emitter.emit(
+                    job_id=effective_job_id,
+                    event_type="loop_completed",
+                    step_index=len(executed_steps),
+                    metrics={
+                        "total_cost": total_cost,
+                        "total_tokens": total_tokens,
+                    },
+                    payload={
+                        "loop_name": loop_def.name,
+                        "steps_executed": executed_steps,
+                        "results": {
+                            k: (v.output.updates if isinstance(v.output, StepOutput) else v.output)
+                            for k, v in results.items()
+                        },
+                    },
+                )
+            else:
+                self.event_emitter.emit(
+                    job_id=effective_job_id,
+                    event_type="loop_failed",
+                    step_index=len(executed_steps),
+                    metrics={
+                        "total_cost": total_cost,
+                        "total_tokens": total_tokens,
+                    },
+                    payload={
+                        "loop_name": loop_def.name,
+                        "error": first_error,
+                    },
+                )
 
         return LoopRunResult(
             success=all_succeeded,
