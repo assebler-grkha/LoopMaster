@@ -13,7 +13,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from .adapter import AgentAdapter
+from .base import AgentAdapter
 
 
 class ConfigError(Exception):

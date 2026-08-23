@@ -19,6 +19,14 @@ class CheckpointError(LoopError):
     """Raised when checkpoint operations fail."""
 
 
+class IncompatibleCheckpointError(CheckpointError):
+    """Raised when a checkpoint is incompatible with the target loop definition."""
+
+
+class MigrationError(CheckpointError):
+    """Raised when checkpoint migration fails."""
+
+
 class BudgetExceededError(LoopError):
     """Raised when budget limit is exceeded."""
 

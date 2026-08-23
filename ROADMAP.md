@@ -63,8 +63,12 @@ opencode (агент)                    MCP-сервер LoopMaster
 - Потокобезопасная трансляция событий в `LoopEngine` и MCP подписках (`loop_started`, `step_started`, `step_chunk`, `step_completed`, `loop_completed`)
 - Защита от утечек памяти: ограничение размера истории событий и исключение токенов-чанков из истории
 
-#### ⏳ Loop versioning и migration
-**Проблема:** `source_hash` может не совпасть после рефакторинга/изменения кода цикла, что блокирует корректный resume из старых чекпоинтов.
+#### ✅ Loop versioning и migration
+- Чистый stdlib SemVer парсер (`SemVer`) с поддержкой версий `1.0.0`, `v1.2.0`, `1.0`, `0.x.y` и защитой от downgrade
+- Политики совместимости `CompatibilityPolicy`: `STRICT`, `SEMVER_COMPATIBLE` (по умолчанию с warning на `source_hash`), `PERMISSIVE`
+- Декларативный реестр миграций `@register_migration` с поиском кратчайшего пути через BFS и защитой от циклов
+- Транзакционное глубокое копирование `deepcopy` перед миграцией и синхронизация переименований шагов `rename_checkpoint_step`
+- Прозрачная интеграция в `LoopEngine.run` и `CheckpointManager.load_and_migrate`
 
 #### ⏳ OpenTelemetry интеграция
 **Проблема:** `MetricsCollector` сохраняет кастомный JSON, отсутствует стандартный экспорт трейсов и спанов (OTEL/OTLP) для Grafana/Jaeger/Datadog.

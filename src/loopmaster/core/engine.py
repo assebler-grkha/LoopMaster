@@ -31,8 +31,11 @@ from .heartbeat import (
 from .state import (
     apply_step_result,
     check_budget_limits,
+    emit_loop_summary_event,
+    emit_step_completed_event,
     init_run_state,
     make_checkpoint,
+    save_observability_data,
 )
 from .step_executor import execute_step
 from .types import (
@@ -41,7 +44,6 @@ from .types import (
     ErrorPolicy,
     InterruptionProtection,
     Step,
-    StepOutput,
     StepResult,
 )
 
@@ -87,6 +89,7 @@ class LoopEngine:
         cost_tracker: CostTracker | None = None,
         llm_client: Any = None,
         event_emitter: EventEmitter | None = None,
+        compatibility_policy: Any = None,
     ) -> None:
         self.error_policy = error_policy or ErrorPolicy()
         self.budget = budget
@@ -96,6 +99,7 @@ class LoopEngine:
         self._cost_tracker = cost_tracker
         self._llm_client = llm_client
         self.event_emitter = event_emitter
+        self.compatibility_policy = compatibility_policy
         self._registry: dict[str, Any] = {}
         self._on_step_complete: Callable[[StepResult], None] | None = None
         self._heartbeat: HeartbeatState | None = None
@@ -131,94 +135,6 @@ class LoopEngine:
             _set_current_steps(None)
         loop_def._collected_steps = list(collected_steps)
         return collected_steps
-
-    def _save_observability_data(self, loop_name: str) -> None:
-        if self._collector:
-            self._collector.end_loop(loop_name)
-            if self.checkpoint_dir:
-                try:
-                    self._collector.save(Path(self.checkpoint_dir) / "metrics.json")
-                except Exception as exc:
-                    logger.warning("Failed to save metrics: %s", exc)
-
-        if self._cost_tracker and self.checkpoint_dir:
-            try:
-                self._cost_tracker.save(Path(self.checkpoint_dir) / "costs.json")
-            except Exception as exc:
-                logger.warning("Failed to save cost data: %s", exc)
-
-    def _emit_step_completed_event(
-        self,
-        job_id: str,
-        step: Step,
-        result: StepResult,
-        step_idx: int,
-        total_steps: int,
-        totals: tuple[float, int],
-    ) -> None:
-        if not self.event_emitter:
-            return
-        total_cost, total_tokens = totals
-        progress = min(1.0, round((step_idx + 1) / max(1, total_steps), 2))
-        output_payload = (
-            result.output.updates if isinstance(result.output, StepOutput) else result.output
-        )
-        self.event_emitter.emit(
-            job_id=job_id,
-            event_type="step_completed" if result.success else "step_failed",
-            step_index=step_idx,
-            metrics={
-                "tokens_used": result.tokens_used,
-                "cost": result.cost,
-                "duration_ms": result.duration_ms,
-                "total_cost": total_cost,
-                "total_tokens": total_tokens,
-            },
-            payload={
-                "step_name": step.name,
-                "success": result.success,
-                "output": output_payload,
-                "error": result.error,
-                "progress": progress,
-            },
-        )
-
-    def _emit_loop_summary_event(
-        self,
-        job_id: str,
-        loop_name: str,
-        executed_steps: list[str],
-        results: dict[str, StepResult],
-        summary: tuple[bool, str | None, float, int],
-    ) -> None:
-        if not self.event_emitter:
-            return
-        all_succeeded, first_error, total_cost, total_tokens = summary
-        metrics = {"total_cost": total_cost, "total_tokens": total_tokens}
-        if all_succeeded:
-            output_results = {
-                k: (v.output.updates if isinstance(v.output, StepOutput) else v.output)
-                for k, v in results.items()
-            }
-            self.event_emitter.emit(
-                job_id=job_id,
-                event_type="loop_completed",
-                step_index=len(executed_steps),
-                metrics=metrics,
-                payload={
-                    "loop_name": loop_name,
-                    "steps_executed": executed_steps,
-                    "results": output_results,
-                },
-            )
-        else:
-            self.event_emitter.emit(
-                job_id=job_id,
-                event_type="loop_failed",
-                step_index=len(executed_steps),
-                metrics=metrics,
-                payload={"loop_name": loop_name, "error": first_error},
-            )
 
     def _execute_single_step(
         self,
@@ -325,8 +241,13 @@ class LoopEngine:
             total_cost += cost_added
             total_tokens += tokens_added
 
-            self._emit_step_completed_event(
-                job_id, step, results[step.name], step_idx, total_steps, (total_cost, total_tokens)
+            emit_step_completed_event(
+                self.event_emitter,
+                job_id,
+                step,
+                results[step.name],
+                (step_idx, total_steps),
+                (total_cost, total_tokens),
             )
 
             if (ip and ip.enabled and ip.post_step_checkpoint) or (not ip or not ip.enabled):
@@ -344,7 +265,10 @@ class LoopEngine:
         job_id: str | None = None,
     ) -> LoopRunResult:
         ctx, executed_steps, results, resume_cnt = init_run_state(
-            initial_context, resume_checkpoint
+            initial_context=initial_context,
+            resume_checkpoint=resume_checkpoint,
+            loop_def=loop_def,
+            compatibility_policy=self.compatibility_policy,
         )
         self._resume_count = resume_cnt
         total_cost, total_tokens, interrupted = 0.0, 0, False
@@ -396,11 +320,14 @@ class LoopEngine:
             if self._heartbeat:
                 stop_heartbeat(self._heartbeat)
                 self._heartbeat = None
-            self._save_observability_data(loop_def.name)
+            save_observability_data(
+                loop_def.name, self._collector, self._cost_tracker, self.checkpoint_dir
+            )
 
         all_succeeded = all(r.success for r in results.values())
         first_error = next((r.error for r in results.values() if not r.success and r.error), None)
-        self._emit_loop_summary_event(
+        emit_loop_summary_event(
+            self.event_emitter,
             effective_job_id,
             loop_def.name,
             executed_steps,

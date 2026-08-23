@@ -1,4 +1,4 @@
-"""Checkpoint manager — save/load checkpoints to/from disk."""
+"""Checkpoint manager — save/load checkpoints to/from disk with migration support."""
 
 from __future__ import annotations
 
@@ -10,10 +10,32 @@ from typing import Any
 
 from ..core.exceptions import CheckpointError
 from ..core.types import CheckpointData
+from .migration import (
+    CompatibilityPolicy,
+    MigrationRegistry,
+    SemVer,
+    check_and_migrate_checkpoint,
+    migrate_checkpoint,
+    migration_registry,
+    register_migration,
+    rename_checkpoint_step,
+)
+
+__all__ = [
+    "CheckpointManager",
+    "CompatibilityPolicy",
+    "MigrationRegistry",
+    "SemVer",
+    "check_and_migrate_checkpoint",
+    "migrate_checkpoint",
+    "migration_registry",
+    "register_migration",
+    "rename_checkpoint_step",
+]
 
 
 class CheckpointManager:
-    """Manages checkpoint persistence.
+    """Manages checkpoint persistence and migrations.
 
     Checkpoints are stored as JSON files in a directory, named by loop_name + hash.
     """
@@ -52,6 +74,40 @@ class CheckpointManager:
         if not filepath.exists():
             raise CheckpointError(f"Checkpoint file not found: {filepath}")
         return self._load_file(filepath)
+
+    def load_and_migrate(
+        self,
+        filepath: Path,
+        target_loop_def: Any,
+        policy: CompatibilityPolicy = CompatibilityPolicy.SEMVER_COMPATIBLE,
+        registry: MigrationRegistry | None = None,
+    ) -> CheckpointData:
+        """Load checkpoint file and validate/migrate against target loop definition."""
+        checkpoint = self.load(filepath)
+        return check_and_migrate_checkpoint(
+            checkpoint=checkpoint,
+            loop_def=target_loop_def,
+            policy=policy,
+            registry=registry,
+        )
+
+    def load_latest_and_migrate(
+        self,
+        loop_name: str,
+        target_loop_def: Any,
+        policy: CompatibilityPolicy = CompatibilityPolicy.SEMVER_COMPATIBLE,
+        registry: MigrationRegistry | None = None,
+    ) -> CheckpointData | None:
+        """Load latest checkpoint and validate/migrate against target loop definition."""
+        checkpoint = self.load_latest(loop_name)
+        if checkpoint is None:
+            return None
+        return check_and_migrate_checkpoint(
+            checkpoint=checkpoint,
+            loop_def=target_loop_def,
+            policy=policy,
+            registry=registry,
+        )
 
     def list_checkpoints(self, loop_name: str | None = None) -> list[dict[str, Any]]:
         """List available checkpoints, optionally filtered by loop name."""

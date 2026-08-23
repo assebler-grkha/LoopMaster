@@ -17,6 +17,8 @@ logger = logging.getLogger("loopmaster.core.state")
 def init_run_state(
     initial_context: dict[str, Any] | None,
     resume_checkpoint: CheckpointData | None,
+    loop_def: Any = None,
+    compatibility_policy: Any = None,
 ) -> tuple[Context, list[str], dict[str, StepResult], int]:
     """Initialize execution context and state from scratch or checkpoint."""
     ctx = Context(initial_context or {})
@@ -25,11 +27,24 @@ def init_run_state(
     resume_count = 0
 
     if resume_checkpoint:
-        ctx = Context(resume_checkpoint.context_data)
-        executed_steps = list(resume_checkpoint.executed_step_names)
+        effective_cp = resume_checkpoint
+        if loop_def is not None:
+            from ..checkpoint.migration import (
+                CompatibilityPolicy,
+                check_and_migrate_checkpoint,
+            )
+
+            pol = compatibility_policy or CompatibilityPolicy.SEMVER_COMPATIBLE
+            effective_cp = check_and_migrate_checkpoint(resume_checkpoint, loop_def, policy=pol)
+
+        ctx = Context(effective_cp.context_data)
+        executed_steps = list(effective_cp.executed_step_names)
         resume_count = 1
-        for step_name, sr in resume_checkpoint.completed_results.items():
-            results[step_name] = StepResult(**sr)
+        for step_name, sr in effective_cp.completed_results.items():
+            if isinstance(sr, StepResult):
+                results[step_name] = sr
+            elif isinstance(sr, dict):
+                results[step_name] = StepResult(**sr)
 
     return ctx, executed_steps, results, resume_count
 
@@ -178,3 +193,102 @@ def apply_step_result(
         on_step_complete(result)
 
     return cost_added, tokens_added
+
+
+def save_observability_data(
+    loop_name: str,
+    collector: Any,
+    cost_tracker: Any,
+    checkpoint_dir: str | Path | None,
+) -> None:
+    """Save metrics and cost data to disk if configured."""
+    if collector:
+        collector.end_loop(loop_name)
+        if checkpoint_dir:
+            try:
+                collector.save(Path(checkpoint_dir) / "metrics.json")
+            except Exception as exc:
+                logger.warning("Failed to save metrics: %s", exc)
+
+    if cost_tracker and checkpoint_dir:
+        try:
+            cost_tracker.save(Path(checkpoint_dir) / "costs.json")
+        except Exception as exc:
+            logger.warning("Failed to save cost data: %s", exc)
+
+
+def emit_step_completed_event(
+    event_emitter: Any,
+    job_id: str,
+    step: Step,
+    result: StepResult,
+    step_meta: tuple[int, int],
+    totals: tuple[float, int],
+) -> None:
+    """Emit step_completed or step_failed event via event emitter."""
+    if not event_emitter:
+        return
+    step_idx, total_steps = step_meta
+    total_cost, total_tokens = totals
+    progress = min(1.0, round((step_idx + 1) / max(1, total_steps), 2))
+    output_payload = (
+        result.output.updates if isinstance(result.output, StepOutput) else result.output
+    )
+    event_emitter.emit(
+        job_id=job_id,
+        event_type="step_completed" if result.success else "step_failed",
+        step_index=step_idx,
+        metrics={
+            "tokens_used": result.tokens_used,
+            "cost": result.cost,
+            "duration_ms": result.duration_ms,
+            "total_cost": total_cost,
+            "total_tokens": total_tokens,
+        },
+        payload={
+            "step_name": step.name,
+            "success": result.success,
+            "output": output_payload,
+            "error": result.error,
+            "progress": progress,
+        },
+    )
+
+
+def emit_loop_summary_event(
+    event_emitter: Any,
+    job_id: str,
+    loop_name: str,
+    executed_steps: list[str],
+    results: dict[str, StepResult],
+    summary: tuple[bool, str | None, float, int],
+) -> None:
+    """Emit loop_completed or loop_failed event via event emitter."""
+    if not event_emitter:
+        return
+    all_succeeded, first_error, total_cost, total_tokens = summary
+    metrics = {"total_cost": total_cost, "total_tokens": total_tokens}
+    if all_succeeded:
+        output_results = {
+            k: (v.output.updates if isinstance(v.output, StepOutput) else v.output)
+            for k, v in results.items()
+        }
+        event_emitter.emit(
+            job_id=job_id,
+            event_type="loop_completed",
+            step_index=len(executed_steps),
+            metrics=metrics,
+            payload={
+                "loop_name": loop_name,
+                "steps_executed": executed_steps,
+                "results": output_results,
+            },
+        )
+    else:
+        event_emitter.emit(
+            job_id=job_id,
+            event_type="loop_failed",
+            step_index=len(executed_steps),
+            metrics=metrics,
+            payload={"loop_name": loop_name, "error": first_error},
+        )
