@@ -8,115 +8,31 @@ import inspect
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
+from .policies import (
+    Budget,
+    ErrorPolicy,
+    InterruptionProtection,
+    RecoveryAction,
+)
 
-class RecoveryAction(Enum):
-    """Action to take after error recovery fails."""
-
-    ABORT = "abort"
-    SKIP = "skip"
-    RETRY = "retry"
-    FALLBACK = "fallback"
-
-    def to_dict(self) -> str:
-        """Serialize to string for YAML export."""
-        return self.value
-
-
-@dataclass
-class ErrorPolicy:
-    """Policy for handling step errors."""
-
-    retry: int = 2
-    backoff: float = 1.0
-    on_failure: RecoveryAction = RecoveryAction.ABORT
-    fallback_model: str | None = None
-
-    def classify(self, error_type: str) -> RecoveryAction:
-        """Classify an error type or message and return the recovery action."""
-        err_str = str(error_type)
-        if (
-            "RateLimitError" in err_str
-            or "429" in err_str
-            or "Too Many Requests" in err_str
-            or "TimeoutError" in err_str
-            or "timed out" in err_str.lower()
-            or "Timeout" in err_str
-        ):
-            return RecoveryAction.RETRY
-        if "ValidationError" in err_str or "SchemaError" in err_str:
-            return RecoveryAction.SKIP
-        return self.on_failure
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize for YAML export."""
-        d: dict[str, Any] = {"retry": self.retry, "backoff": self.backoff}
-        if self.on_failure != RecoveryAction.ABORT:
-            d["on_failure"] = self.on_failure.value
-        if self.fallback_model:
-            d["fallback_model"] = self.fallback_model
-        return d
-
-
-@dataclass
-class Budget:
-    """Budget constraints for a loop."""
-
-    max_cost: float | None = None
-    max_tokens: int | None = None
-    max_steps: int | None = None
-
-    @classmethod
-    def from_string(cls, value: str) -> Budget:
-        """Parse budget from string like '$5.00'."""
-        if value.startswith("$"):
-            return cls(max_cost=float(value[1:]))
-        return cls(max_cost=float(value))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize for YAML export."""
-        d: dict[str, Any] = {}
-        if self.max_cost is not None:
-            d["max_cost"] = self.max_cost
-        if self.max_tokens is not None:
-            d["max_tokens"] = self.max_tokens
-        if self.max_steps is not None:
-            d["max_steps"] = self.max_steps
-        return d
-
-
-@dataclass
-class InterruptionProtection:
-    """Configuration for interruption detection and recovery."""
-
-    enabled: bool = False
-    heartbeat_interval: float = 30.0
-    heartbeat_timeout: float = 60.0
-    pre_step_checkpoint: bool = True
-    post_step_checkpoint: bool = True
-    context_overflow_strategy: str = "compress_and_resume"
-    max_resume_attempts: int = 3
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize for YAML export."""
-        d: dict[str, Any] = {}
-        if self.enabled:
-            d["enabled"] = True
-        if self.heartbeat_interval != 30.0:
-            d["heartbeat_interval"] = self.heartbeat_interval
-        if self.heartbeat_timeout != 60.0:
-            d["heartbeat_timeout"] = self.heartbeat_timeout
-        if not self.pre_step_checkpoint:
-            d["pre_step_checkpoint"] = False
-        if not self.post_step_checkpoint:
-            d["post_step_checkpoint"] = False
-        if self.context_overflow_strategy != "compress_and_resume":
-            d["context_overflow_strategy"] = self.context_overflow_strategy
-        if self.max_resume_attempts != 3:
-            d["max_resume_attempts"] = self.max_resume_attempts
-        return d
+__all__ = [
+    "RecoveryAction",
+    "ErrorPolicy",
+    "Budget",
+    "InterruptionProtection",
+    "StepInput",
+    "StepOutput",
+    "StepResult",
+    "Step",
+    "Parallel",
+    "Conditional",
+    "LoopDef",
+    "Loop",
+    "resolve_prompt",
+    "CheckpointData",
+]
 
 
 @dataclass
@@ -148,19 +64,34 @@ class StepOutput:
 
 
 def resolve_prompt(template: str, ctx_data: dict[str, Any]) -> str:
-    """Resolve variables like {var} or {{var}} from context without failing on JSON braces."""
+    """Resolve variables like {var} or {step.stdout} from context without failing on JSON braces."""
     import re
 
     if not template:
         return template
 
+    def _resolve_key(path: str) -> Any:
+        parts = path.split(".")
+        val: Any = ctx_data
+        for part in parts:
+            if isinstance(val, dict):
+                val = val.get(part)
+            elif hasattr(val, part):
+                val = getattr(val, part)
+            else:
+                return None
+            if val is None:
+                return None
+        return val
+
     def _repl(match: re.Match[str]) -> str:
         key = match.group(1)
-        if key in ctx_data:
-            return str(ctx_data[key])
+        resolved = _resolve_key(key)
+        if resolved is not None:
+            return str(resolved)
         return match.group(0)
 
-    return re.sub(r"\{\{?([a-zA-Z_]\w*)\}?\}", _repl, template)
+    return re.sub(r"\{\{?([a-zA-Z_][\w\.]*)\}?\}", _repl, template)
 
 
 @dataclass
@@ -192,6 +123,7 @@ class Step:
     model: str | None = None
     prompt: str | None = None
     input: Any = None
+    executor: Any | None = None
     retry: int | None = None
     timeout: float | None = None
     on_error: ErrorPolicy | None = None
@@ -212,17 +144,24 @@ class Step:
 
         start = time.monotonic()
         try:
-            if self._engine_callback:
+            if self.executor:
+                output = self.executor.execute(ctx_data)
+            elif self._engine_callback:
                 output = self._engine_callback(self, ctx_data)
             else:
                 output = self._execute_default(ctx_data)
+
             duration = (time.monotonic() - start) * 1000
             tokens = getattr(output, "_tokens", 0)
             cost = getattr(output, "_cost", 0.0)
+            output_success = getattr(output, "success", True)
+            output_error = getattr(output, "error", None)
+
             result = StepResult(
                 step_name=self.name,
-                success=True,
+                success=output_success,
                 output=output,
+                error=output_error if not output_success else None,
                 tokens_used=tokens,
                 cost=cost,
                 duration_ms=duration,
@@ -257,6 +196,10 @@ class Step:
             d["prompt"] = self.prompt
         if self.input is not None:
             d["input"] = self.input
+        if self.executor is not None:
+            d["executor"] = (
+                self.executor.to_dict() if hasattr(self.executor, "to_dict") else str(self.executor)
+            )
         if self.retry is not None:
             d["retry"] = self.retry
         if self.timeout is not None:

@@ -154,6 +154,8 @@ def apply_step_result(
             ctx.merge(result.output.updates)
         elif isinstance(result.output, dict):
             ctx.merge(result.output)
+        elif hasattr(result.output, "to_dict") and not hasattr(result.output, "_is_llm_response"):
+            ctx._data[step.name] = result.output
         else:
             output_val = getattr(result.output, "content", result.output)
             ctx._data[step.name] = output_val

@@ -87,8 +87,13 @@ opencode (агент)                    MCP-сервер LoopMaster
 - Изоляция скоупа сбора дочерних шагов на базе `id(s)` без конфликтов с мутабельными датаклассами
 - Сквозная интеграция с SSE (`branch_selected`), OpenTelemetry (`conditional.<name>` спаны), YAML экспортом и MCP discovery
 
-#### Tool execution bridge
-Встроенные executors: ShellExecutor, HTTPExecutor, MCPToolExecutor.
+#### ✅ Tool execution bridge
+- Встроенные executors: `ShellExecutor`, `HTTPExecutor`, `MCPToolExecutor` на базе чистой стандартной библиотеки Python (zero dependencies)
+- Безопасное исполнение Shell-процессов с изоляцией сессий `os.setsid`, очисткой дерева процессов (`taskkill /F /T` / `os.killpg`) и защитой от shell injection
+- Полнофункциональный `HTTPExecutor` с захватом тел ошибок `HTTPError`, поддержкой 204 No Content и проверкой `allowed_status`
+- Легковесный клиент `MCPToolExecutor` с NDJSON framing, протокольным handshake (`initialize` -> `notifications/initialized` -> `tools/call`), таймаутами и защитой от stderr deadlock
+- Рекурсивная шаблонизация переменных с поддержкой dot-notation (`{step.stdout}`, `{http.body.user.id}`) и сохранением структуры данных в контексте
+- Автоматическая OTel-инструментация с `SpanKind.CLIENT` (`tool.shell`, `tool.http`, `tool.mcp`)
 
 #### Loop marketplace
 Registry/pypi для loop definitions.

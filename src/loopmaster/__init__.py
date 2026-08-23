@@ -20,6 +20,15 @@ from loopmaster.core import (
     StepOutput,
     StepResult,
 )
+from loopmaster.executors import (
+    BaseExecutor,
+    HTTPExecutor,
+    HTTPResult,
+    MCPToolExecutor,
+    MCPToolResult,
+    ShellExecutor,
+    ShellResult,
+)
 
 __version__ = "0.1.0"
 
@@ -28,6 +37,13 @@ __all__ = [
     "Step",
     "Parallel",
     "Conditional",
+    "BaseExecutor",
+    "ShellExecutor",
+    "ShellResult",
+    "HTTPExecutor",
+    "HTTPResult",
+    "MCPToolExecutor",
+    "MCPToolResult",
     "StepInput",
     "StepOutput",
     "StepResult",
