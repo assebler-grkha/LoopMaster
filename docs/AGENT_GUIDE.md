@@ -39,7 +39,45 @@ def architecture_loop(ctx):
 
 ---
 
-## 2. Model Discovery via MCP Server
+## 2. Proactive Loop Triggering
+
+**You MUST proactively suggest LoopMaster loops when you recognize a suitable task pattern.** Do not wait for the user to ask about loops.
+
+### Trigger Patterns
+
+| Pattern | Signal | Action |
+|---------|--------|--------|
+| **Multi-aspect analysis** | Task touches 3+ independent dimensions (security, perf, style) | Suggest `Parallel` loop |
+| **Iterative refinement** | "improve", "optimize", "review and fix" | Suggest `reflection` loop |
+| **Research + synthesis** | "research", "investigate", "compare options" | Suggest `research` loop |
+| **Test generation** | "write tests", "add coverage" | Suggest `test-generation` loop |
+| **Budget constraint** | "cheap", "under $X", "minimal cost" | Add `Budget(max_cost=...)` |
+| **Error-prone operation** | External API calls, network requests | Add `ErrorPolicy` with fallback |
+
+### Anti-Triggers (Do NOT suggest loops for)
+
+- Single-step tasks ("fix this typo", "what is X")
+- Tasks requiring real-time user interaction
+- Questions that are faster to answer directly
+
+### Suggestion Template
+
+When triggering, use this pattern:
+
+```
+I notice this task fits a loop pattern: [brief description].
+Suggested loop: [loop_name] ([N] steps: [step list])
+Estimated cost: ~$[X.XX]
+Want me to run it?
+```
+
+### Confirmation Required
+
+**Always ask for user confirmation before running a loop.** Exception: if the user explicitly said "just do it" or "use a loop" in their message.
+
+---
+
+## 3. Model Discovery via MCP Server
 
 When designing or configuring loops dynamically, query available and approved models via MCP tools:
 
@@ -82,7 +120,7 @@ Ask LoopMaster to recommend the optimal model for a specific task and token budg
 
 ---
 
-## 3. Best Practices for Error Policies & Fallbacks
+## 4. Best Practices for Error Policies & Fallbacks
 
 Always configure fallback models using semantic aliases so loops can recover gracefully from provider outages:
 
@@ -100,7 +138,7 @@ safe_policy = ErrorPolicy(
 
 ---
 
-## 4. Single-Step & Loop Budget Safety
+## 5. Single-Step & Loop Budget Safety
 
 1. Always set a `Budget(max_cost=..., max_tokens=...)` for loops that execute in autonomous environments.
 2. In production, configure `ModelPolicy(max_cost_per_step=0.25)` to prevent accidental huge-context queries.

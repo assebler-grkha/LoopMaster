@@ -10,7 +10,6 @@ build/
 *.egg
 theme
 .env
-docs/USAGE.md
 .loopmaster/
 *.db
 *.db-wal

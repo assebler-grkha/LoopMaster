@@ -69,6 +69,7 @@ result = engine.run(review_pipeline, {"target_branch": "main"})
   - [Metrics & Cost Tracking (SQLite)](#metrics--cost-tracking-sqlite)
 - [Model Context Protocol (MCP) Server](#model-context-protocol-mcp-server)
 - [Agent Adapters](#agent-adapters)
+- [Agent Integration](#agent-integration)
 - [Built-in Templates](#built-in-templates)
 - [CLI Reference](#cli-reference)
 - [Supported Providers](#supported-providers)
@@ -108,6 +109,7 @@ LoopMaster is a **runtime engine** for agent loops.
 - 🔄 **Loop Versioning & Checkpoint Migration**: SemVer-based compatibility policies and declarative BFS migration chains.
 - 🛡️ **Budget & Interruption Protection**: Heartbeat monitors, max cost/token guards, pre/post step checkpoints, and fallback models.
 - 🔌 **FastMCP Integration**: First-class Model Context Protocol server exposing `loop_run`, `loop_status`, `loop_result`, and `loop_events`.
+- 🤖 **Agent Integration**: Proactive loop triggering rules for AI coding assistants.
 - 🧪 **Deterministic Replay**: Record live LLM responses and replay them deterministically in test suites without network calls.
 
 ---
@@ -555,6 +557,26 @@ adapter = CustomAdapter(
     prompt_path="/path/to/prompt.md",
 )
 ```
+
+---
+
+## Agent Integration
+
+LoopMaster provides **proactive loop triggering rules** for AI coding assistants. When an agent recognizes a task pattern that matches a loop structure, it should suggest running the loop instead of executing steps manually.
+
+### Quick Reference
+
+| Task Pattern | Suggested Action |
+|-------------|-----------------|
+| Multi-aspect analysis (3+ dimensions) | `Parallel` loop |
+| Iterative refinement ("improve", "optimize") | `reflection` loop |
+| Research + synthesis | `research` loop |
+| Test generation | `test-generation` loop |
+| Budget constraint | Add `Budget(max_cost=...)` |
+
+**Key rule:** Always ask for user confirmation before running a loop.
+
+See [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) for full proactive triggering rules and [`docs/USAGE.md`](docs/USAGE.md) for detailed usage patterns.
 
 ---
 
