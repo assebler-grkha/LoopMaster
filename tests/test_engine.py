@@ -369,7 +369,7 @@ def test_loop_body_not_reexecuted_on_resume(tmp_path):
     cp = mgr.load_latest("cache_test")
     assert cp is not None
 
-    result2 = engine.run(my_loop, resume_checkpoint=cp)
+    engine.run(my_loop, resume_checkpoint=cp)
     assert body_call_count["n"] == 1, "Body was re-executed during resume"
 
 

@@ -1,8 +1,9 @@
-"""LLM client package for LoopMaster."""
-
 from .client import (
-    AuthenticationError,
     LLMClient,
+    complete,
+)
+from .types import (
+    AuthenticationError,
     LLMConfig,
     LLMError,
     LLMResponse,
@@ -10,7 +11,6 @@ from .client import (
     RateLimitError,
     StreamChunk,
     TimeoutError,
-    complete,
     get_llm_config,
 )
 

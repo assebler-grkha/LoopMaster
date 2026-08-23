@@ -1,5 +1,5 @@
-from loopmaster.agents.registry import AgentRegistry
 from loopmaster.agents.adapter import CursorAdapter
+from loopmaster.agents.registry import AgentRegistry
 
 
 class TestCursorAdapter:

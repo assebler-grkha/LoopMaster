@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from loopmaster.core import (
     Budget,
     BudgetExceededError,
-    Context,
     ErrorPolicy,
     Loop,
     LoopEngine,
@@ -17,7 +14,7 @@ from loopmaster.core import (
     Step,
 )
 from loopmaster.cost.tracker import CostTracker
-from loopmaster.llm import LLMClient, LLMResponse, RateLimitError, TimeoutError
+from loopmaster.llm import LLMResponse, RateLimitError
 from loopmaster.metrics.collector import MetricsCollector
 
 
@@ -26,7 +23,9 @@ class MockLLMClient:
         self.responses = responses or {}
         self.calls: list[dict[str, str]] = []
 
-    def complete(self, prompt: str, system: str | None = None, model: str | None = None) -> LLMResponse:
+    def complete(
+        self, prompt: str, system: str | None = None, model: str | None = None
+    ) -> LLMResponse:
         self.calls.append({"prompt": prompt, "model": model or ""})
         for key, resp in self.responses.items():
             if key in prompt:
@@ -168,6 +167,7 @@ class TestEngineLLMIntegration:
 
     def test_model_fallback_execution_and_cost(self):
         """Verify that fallback model executes and records the fallback model and cost."""
+
         class FallbackLLMClient:
             def complete(self, prompt: str, system: str = None, model: str = None):
                 if model == "expensive-unavailable-model":

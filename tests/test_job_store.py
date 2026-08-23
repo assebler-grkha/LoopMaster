@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import concurrent.futures
-import time
 from pathlib import Path
 
-import pytest
-
-from loopmaster.mcp.job_store import JobData, JobStore
+from loopmaster.mcp.job_store import JobStore
 
 
 class TestJobStoreBasics:

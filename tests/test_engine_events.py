@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-import pytest
-
 from loopmaster.core import (
     ErrorPolicy,
     Loop,
@@ -19,7 +17,9 @@ from loopmaster.llm import LLMResponse, RateLimitError, StreamChunk
 
 
 class MockStreamingLLMClient:
-    def complete(self, prompt: str, system: str | None = None, model: str | None = None) -> LLMResponse:
+    def complete(
+        self, prompt: str, system: str | None = None, model: str | None = None
+    ) -> LLMResponse:
         return LLMResponse(
             content="Fallback completed",
             prompt_tokens=10,
@@ -94,7 +94,9 @@ class TestEngineEvents:
         call_count = 0
 
         class FlakyStreamingClient:
-            def stream_complete(self, prompt: str, system: str | None = None, model: str | None = None):
+            def stream_complete(
+                self, prompt: str, system: str | None = None, model: str | None = None
+            ):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:

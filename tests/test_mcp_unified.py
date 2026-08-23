@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from loopmaster.llm import LLMResponse
 from scripts.loopmaster_mcp import (
     _find_loop_files,

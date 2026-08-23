@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -13,8 +13,6 @@ from loopmaster.llm import (
     AuthenticationError,
     LLMClient,
     LLMConfig,
-    LLMError,
-    ProviderAPIError,
     RateLimitError,
     TimeoutError,
     complete,
@@ -142,7 +140,10 @@ class TestLLMClientProviders:
             "choices": [{"message": {"content": "Direct text"}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 5},
         }
-        with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(mock_resp_data).encode("utf-8"))):
+        with patch(
+            "urllib.request.urlopen",
+            return_value=io.BytesIO(json.dumps(mock_resp_data).encode("utf-8")),
+        ):
             text = complete(config, "Hello")
             assert text == "Direct text"
 

@@ -14,11 +14,10 @@ def _run_streaming_step(
     resolved_prompt: str,
     llm_client: Any,
     cost_tracker: Any,
-    event_emitter: Any,
-    job_id: str,
-    step_index: int,
+    event_context: tuple[Any, str, int],
 ) -> StepResult:
     """Execute step via streaming LLM API."""
+    event_emitter, job_id, step_index = event_context
     start = time.monotonic()
     chunks: list[str] = []
     prompt_tokens = 0
@@ -131,9 +130,7 @@ def _run_step_once(
                 resolved_prompt=resolved_prompt,
                 llm_client=llm_client,
                 cost_tracker=cost_tracker,
-                event_emitter=event_emitter,
-                job_id=job_id,
-                step_index=step_index,
+                event_context=(event_emitter, job_id, step_index),
             )
 
         return _run_sync_step(

@@ -34,7 +34,10 @@ class TestPromptResolution:
         prompt = 'Format response as JSON: {"status": "ok", "user": {user_name}, "data": {"items": [1, 2]}}'
         ctx = {"user_name": "Gregory"}
         res = resolve_prompt(prompt, ctx)
-        assert res == 'Format response as JSON: {"status": "ok", "user": Gregory, "data": {"items": [1, 2]}}'
+        assert (
+            res
+            == 'Format response as JSON: {"status": "ok", "user": Gregory, "data": {"items": [1, 2]}}'
+        )
 
     def test_empty_and_none_templates(self):
         assert resolve_prompt("", {"a": 1}) == ""

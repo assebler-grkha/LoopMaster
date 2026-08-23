@@ -8,12 +8,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from loopmaster.llm import (
-    AuthenticationError,
     LLMClient,
     LLMConfig,
     RateLimitError,
-    StreamChunk,
-    TimeoutError,
 )
 
 
@@ -28,11 +25,11 @@ class TestLLMStreaming:
         client = LLMClient(config=config)
 
         sse_body = (
-            b': keep-alive\n\n'
+            b": keep-alive\n\n"
             b'data: {"model": "gpt-4o", "choices": [{"delta": {"content": "Hello"}}]}\n\n'
             b'data: {"model": "gpt-4o", "choices": [{"delta": {"content": " World!"}}]}\n\n'
             b'data: {"model": "gpt-4o", "choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}}\n\n'
-            b'data: [DONE]\n\n'
+            b"data: [DONE]\n\n"
         )
 
         mock_resp = MagicMock()
@@ -60,15 +57,15 @@ class TestLLMStreaming:
         client = LLMClient(config=config)
 
         sse_body = (
-            b'event: message_start\n'
+            b"event: message_start\n"
             b'data: {"type": "message_start", "message": {"model": "claude-3-5-sonnet", "usage": {"input_tokens": 15}}}\n\n'
-            b'event: content_block_delta\n'
+            b"event: content_block_delta\n"
             b'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Anthropic"}}\n\n'
-            b'event: content_block_delta\n'
+            b"event: content_block_delta\n"
             b'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": " stream"}}\n\n'
-            b'event: message_delta\n'
+            b"event: message_delta\n"
             b'data: {"type": "message_delta", "usage": {"output_tokens": 6}}\n\n'
-            b'event: message_stop\n'
+            b"event: message_stop\n"
             b'data: {"type": "message_stop"}\n\n'
         )
 

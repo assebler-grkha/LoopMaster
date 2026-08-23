@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from loopmaster.events import EventEmitter, LoopEvent, SSEStream, format_sse
+from loopmaster.events import EventEmitter, SSEStream, format_sse
 
 
 class TestSSEFormatting:
@@ -53,8 +53,12 @@ class TestSSEStream:
 
         emitter.emit("job-1", "step_started", step_index=0, payload={"step_name": "s1"})
         emitter.emit("job-1", "step_chunk", step_index=0, payload={"delta": "Hi"})
-        emitter.emit("job-2", "step_started", step_index=0, payload={"step_name": "s2"})  # filtered out
-        emitter.emit("job-1", "loop_completed", step_index=1, payload={"status": "done"})  # terminal
+        emitter.emit(
+            "job-2", "step_started", step_index=0, payload={"step_name": "s2"}
+        )  # filtered out
+        emitter.emit(
+            "job-1", "loop_completed", step_index=1, payload={"status": "done"}
+        )  # terminal
 
         await asyncio.wait_for(task, timeout=2.0)
 
