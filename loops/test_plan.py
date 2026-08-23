@@ -40,7 +40,11 @@ def test_parallel(ctx):
         Step("branch_b", model=MODEL, prompt="What is 3+3?"),
         Step("branch_c", model=MODEL, prompt="What is 7+7?"),
     )
-    Step("combine", model=MODEL, prompt="Add these results: {{branch_a}} + {{branch_b}} + {{branch_c}}")
+    Step(
+        "combine",
+        model=MODEL,
+        prompt="Add these results: {{branch_a}} + {{branch_b}} + {{branch_c}}",
+    )
     return ctx
 
 
@@ -52,7 +56,9 @@ def test_conditional(ctx):
     Conditional(
         condition="'yes' in '{{check}}'.lower()",
         then_steps=[
-            Step("confirm", model=MODEL, prompt="Great! The sky is indeed blue. Confirm this fact."),
+            Step(
+                "confirm", model=MODEL, prompt="Great! The sky is indeed blue. Confirm this fact."
+            ),
         ],
         else_steps=[
             Step("deny", model=MODEL, prompt="Interesting. Explain why the sky might not be blue."),

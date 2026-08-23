@@ -14,4 +14,5 @@ theme
 *.db
 *.db-wal
 *.db-shm
+docs/PLAN-token-optimization.md
 
