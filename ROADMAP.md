@@ -55,16 +55,19 @@ opencode (агент)                    MCP-сервер LoopMaster
 - Единый execution path: `loop_run` в MCP полностью делегирует выполнение в ядро `LoopEngine`
 - Сквозной сбор метрик, раздельный учет input/output токенов и расчет затрат
 
-### P1: Важные (2-4 недели)
+### P1: Важные (Фаза 2: Scale & Observability)
 
-#### Streaming progress через SSE
-**Проблема:** Нет реального streaming progress.
+#### ✅ Streaming progress через SSE
+- Стандартизованный SSE W3C эмиттер (`src/loopmaster/events/sse.py`, `format_sse`)
+- Потоковый парсинг LLM чанков в реальном времени для OpenAI, Anthropic и Google Gemini
+- Потокобезопасная трансляция событий в `LoopEngine` и MCP подписках (`loop_started`, `step_started`, `step_chunk`, `step_completed`, `loop_completed`)
+- Защита от утечек памяти: ограничение размера истории событий и исключение токенов-чанков из истории
 
-#### Loop versioning и migration
-**Проблема:** source_hash может не совпасть после рефакторинга.
+#### ⏳ Loop versioning и migration
+**Проблема:** `source_hash` может не совпасть после рефакторинга/изменения кода цикла, что блокирует корректный resume из старых чекпоинтов.
 
-#### OpenTelemetry интеграция
-**Проблема:** MetricsCollector — свой формат, нет интеграции с Grafana/Datadog.
+#### ⏳ OpenTelemetry интеграция
+**Проблема:** `MetricsCollector` сохраняет кастомный JSON, отсутствует стандартный экспорт трейсов и спанов (OTEL/OTLP) для Grafana/Jaeger/Datadog.
 
 ### P2: Желаемые (1-2 месяца)
 
