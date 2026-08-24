@@ -235,3 +235,23 @@ loop_run("security_audit", context={"path": "/path/to/project"})
 ```
 
 Proactive triggering rules are defined in `docs/AGENT_GUIDE.md` section 2.
+
+---
+
+## Templates
+
+Ready-to-use loop templates in `templates/` directory. Customize for your project.
+
+| Template | Description | Customization |
+|----------|-------------|---------------|
+| `scenario12_arch_debate.py` | Architectural debate producing ADRs | Connect your codebase search and source reader |
+
+### Quick start
+
+```bash
+cp templates/scenario12_arch_debate.py my-project/loops/
+# Edit _search_codebase() and _read_source() in the copied file
+loopmaster run my-project/loops/scenario12_arch_debate.py
+```
+
+See `templates/README.md` for full customization guide.
