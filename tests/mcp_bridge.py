@@ -20,8 +20,8 @@ import json
 import sqlite3
 import subprocess
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────
 AGENTDB_PATH = Path("C:/Users/Gregory/.opencode-mcp/pathfinder-app/.agentdb/pathfinder.db")
@@ -154,6 +154,55 @@ def tool_agentdb_store(doc_id: str, domain: str, content: str, metadata: str = "
     conn.commit()
     conn.close()
     return msg
+
+
+def tool_write_file(file_path: str, content: str, backup: bool = True) -> str:
+    """Write content to a file, with optional backup."""
+    from pathlib import Path as _P
+
+    p = _P(file_path)
+    if backup and p.exists():
+        backup_path = p.with_suffix(p.suffix + ".bak")
+        backup_path.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return json.dumps({"written": str(p), "bytes": len(content.encode("utf-8"))})
+
+
+def tool_read_file(file_path: str) -> str:
+    """Read file content."""
+    from pathlib import Path as _P
+
+    p = _P(file_path)
+    if not p.exists():
+        return json.dumps({"error": f"File not found: {file_path}"})
+    return p.read_text(encoding="utf-8")
+
+
+def tool_run_tests(test_path: str = ".") -> str:
+    """Run pytest and return results."""
+    import subprocess as _sp
+
+    try:
+        result = _sp.run(
+            [sys.executable, "-m", "pytest", test_path, "-x", "-q", "--tb=short"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return json.dumps(
+            {
+                "returncode": result.returncode,
+                "stdout": result.stdout[-2000:],
+                "stderr": result.stderr[-1000:],
+            }
+        )
+    except _sp.TimeoutExpired:
+        return json.dumps({"error": "Tests timed out after 120s"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 def tool_agentdb_search(query: str, domain: str = "", limit: int = 10) -> str:

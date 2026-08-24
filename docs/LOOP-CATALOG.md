@@ -206,7 +206,7 @@ Code accumulates complexity, duplicates, and anti-patterns. Developers know refa
 
 ### Budget protection
 
-`Budget(max_steps=20)` limits iterations.
+`Budget(max_steps=25)` limits iterations.
 
 ### Key tools used
 

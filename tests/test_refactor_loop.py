@@ -1,41 +1,36 @@
-"""Test script for arch_debate loop."""
+"""Test script for refactor_loop."""
 
 import os
 import sys
 
-# Set environment variables
 os.environ["LOOPMASTER_LLM_PROVIDER"] = "openrouter"
 os.environ["LOOPMASTER_LLM_MODEL"] = "stealth/ox-alpha"
 
-# Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from loopmaster.core.engine import LoopEngine
 from loopmaster.core.types import ErrorPolicy, RecoveryAction
 
-# Import the loop definition
 spec = __import__("importlib").util.spec_from_file_location(
-    "arch_debate_loop",
-    os.path.join(os.path.dirname(__file__), "..", "loops", "scenario12_arch_debate.py"),
+    "refactor_loop",
+    os.path.join(os.path.dirname(__file__), "..", "loops", "scenario13_refactor_loop.py"),
 )
 module = __import__("importlib").util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-# @Loop decorator returns LoopDef directly (not the function)
-loop_def = getattr(module, "arch_debate", None)
+loop_def = getattr(module, "refactor_loop", None)
 if loop_def is None:
-    print("ERROR: arch_debate not found in module")
+    print("ERROR: refactor_loop not found")
     sys.exit(1)
 
 from loopmaster.core.types import LoopDef
 
 if not isinstance(loop_def, LoopDef):
-    print(f"ERROR: arch_debate is {type(loop_def)}, not LoopDef")
+    print(f"ERROR: refactor_loop is {type(loop_def)}, not LoopDef")
     sys.exit(1)
 
 print(f"Found loop: {loop_def.name} v{loop_def.version}")
 
-# Create engine and run
 engine = LoopEngine(
     error_policy=ErrorPolicy(
         retry=2,
@@ -45,9 +40,8 @@ engine = LoopEngine(
 )
 engine.register(loop_def)
 
-# Test with a simple goal
 context = {
-    "goal": "Optimize database queries for the user authentication module",
+    "path": "loops/",
     "project": "C-Projects-Ideas-LoopMaster",
 }
 

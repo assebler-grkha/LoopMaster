@@ -4,16 +4,16 @@
 Replaces AgentDB with simple JSON file storage in .loopmaster/decisions/.
 
 Usage:
-    python templates/storage_tool.py store --doc_id "adr-my-project-123" --domain "adr" --content "..."
+    python templates/storage_tool.py store \
+        --doc_id "adr-my-project-123" --domain "adr" --content "..."
     python templates/storage_tool.py search --query "auth" --domain "adr"
     python templates/storage_tool.py get --doc_id "adr-my-project-123"
 """
 
 import json
-import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 STORE_DIR = Path(".loopmaster/decisions")
 
@@ -78,9 +78,13 @@ def main():
             i += 1
 
     if action == "store":
-        result = store_doc(args["doc_id"], args["domain"], args["content"], args.get("metadata", "{}"))
+        result = store_doc(
+            args["doc_id"], args["domain"], args["content"], args.get("metadata", "{}")
+        )
     elif action == "search":
-        result = search_docs(args.get("query", ""), args.get("domain", ""), int(args.get("limit", "10")))
+        result = search_docs(
+            args.get("query", ""), args.get("domain", ""), int(args.get("limit", "10"))
+        )
     elif action == "get":
         result = get_doc(args["doc_id"])
     else:

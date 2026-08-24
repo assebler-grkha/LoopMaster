@@ -22,10 +22,8 @@ Customization:
   3. Adjust prompts to match your team's ADR format
 """
 
-import json
 import os
 import sys
-import time
 from pathlib import Path
 
 from loopmaster import Budget, Loop, ShellExecutor, Step
@@ -50,7 +48,9 @@ def _search_codebase(query: str, project: str) -> list[str]:
     that LoopMaster will resolve at runtime.
 
     Options:
-      - codebase-memory MCP: ["python", "mcp_tool.py", "search_graph", "--query", query, "--project", project]
+      - codebase-memory MCP:
+        ["python", "mcp_tool.py", "search_graph",
+         "--query", query, "--project", project]
       - ripgrep: ["rg", "--json", query, project_dir]
       - grep: ["grep", "-r", query, project_dir]
       - Custom API: ["curl", "https://your-api/search?q="+query]
@@ -66,7 +66,9 @@ def _read_source(qualified_name: str, project: str) -> list[str]:
     that LoopMaster will resolve at runtime.
 
     Options:
-      - codebase-memory MCP: ["python", "mcp_tool.py", "get_snippet", "--qualified_name", qualified_name, "--project", project]
+      - codebase-memory MCP:
+        ["python", "mcp_tool.py", "get_snippet",
+         "--qualified_name", qualified_name, "--project", project]
       - cat: ["cat", f"src/{qualified_name.replace('.', '/')}.py"]
       - Custom API: ["curl", "https://your-api/snippet?name="+name]
     """
@@ -252,9 +254,7 @@ def arch_debate(ctx):
     # CODEBASE SEARCH: Replace _search_codebase() with your tool
     Step(
         "gather_context",
-        executor=ShellExecutor(
-            command=_search_codebase("{goal}", "{project}")
-        ),
+        executor=ShellExecutor(command=_search_codebase("{goal}", "{project}")),
     )
 
     Conditional(
@@ -300,9 +300,7 @@ def arch_debate(ctx):
     # SOURCE READER: Replace _read_source() with your tool
     Step(
         "read_sources",
-        executor=ShellExecutor(
-            command=_read_source("{extract_first_name}", "{project}")
-        ),
+        executor=ShellExecutor(command=_read_source("{extract_first_name}", "{project}")),
     )
 
     Step(
