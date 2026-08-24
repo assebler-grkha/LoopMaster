@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -65,6 +66,9 @@ mcp = FastMCP(
 
 _store = get_job_store()
 _store.mark_interrupted_jobs_on_startup()
+
+# Global map of active cancel events keyed by job_id
+_cancel_events: dict[str, threading.Event] = {}
 
 
 # ── MCP Tools ────────────────────────────────────────────────────────────────
@@ -206,10 +210,13 @@ def loop_status(job_id: str) -> str:
 
 @mcp.tool()
 def loop_cancel(job_id: str) -> str:
-    """Cancel a loop execution in SQLite store."""
+    """Cancel a running loop execution."""
     job = _store.get_job(job_id)
     if not job:
         return f"Error: Job '{job_id}' not found."
+    cancel_event = _cancel_events.get(job_id)
+    if cancel_event:
+        cancel_event.set()
     _store.cancel_job(job_id)
     return f"Loop '{job.loop_name}' cancelled."
 
@@ -306,7 +313,7 @@ def loop_run(
     model: str | None = None,
     search_dir: str | None = None,
 ) -> str:
-    """Execute a loop end-to-end using LoopEngine and multi-provider LLM API."""
+    """Execute a loop end-to-end. Returns immediately with job_id; poll loop_status for progress."""
     config = get_llm_config(model_override=model)
     if not config:
         return json.dumps(
@@ -339,34 +346,43 @@ def loop_run(
         status="running",
     )
 
-    start_time = time.time()
-    engine = LoopEngine(
-        budget=target_loop_def.budget,
-        error_policy=ErrorPolicy(),
-        interruption_protection=target_loop_def.interruption_protection,
-        cost_tracker=CostTracker(),
-        metrics_collector=MetricsCollector(),
-        llm_client=LLMClient(config=config),
-    )
+    cancel_event = threading.Event()
+    _cancel_events[job_id] = cancel_event
 
-    try:
-        run_result = engine.run(target_loop_def, initial_context=ctx_data)
-    except Exception as exc:
-        duration_ms = int((time.time() - start_time) * 1000)
-        _store.update_job(job_id=job_id, status="failed", error=str(exc), completed=True)
-        return json.dumps(
-            {
-                "job_id": job_id,
-                "status": "failed",
-                "loop_name": loop_name,
-                "error": str(exc),
-                "duration_ms": duration_ms,
-            },
-            indent=2,
+    def _run_background():
+        start_time = time.time()
+        engine = LoopEngine(
+            budget=target_loop_def.budget,
+            error_policy=ErrorPolicy(),
+            interruption_protection=target_loop_def.interruption_protection,
+            cost_tracker=CostTracker(),
+            metrics_collector=MetricsCollector(),
+            llm_client=LLMClient(config=config),
+            cancel_event=cancel_event,
         )
+        try:
+            run_result = engine.run(target_loop_def, initial_context=ctx_data)
+        except Exception as exc:
+            duration_ms = int((time.time() - start_time) * 1000)
+            _store.update_job(job_id=job_id, status="failed", error=str(exc), completed=True)
+            _cancel_events.pop(job_id, None)
+            return
+        duration_ms = int((time.time() - start_time) * 1000)
+        _cancel_events.pop(job_id, None)
+        _handle_run_completion(run_result, job_id, loop_name, config, duration_ms)
 
-    duration_ms = int((time.time() - start_time) * 1000)
-    return _handle_run_completion(run_result, job_id, loop_name, config, duration_ms)
+    thread = threading.Thread(target=_run_background, daemon=True)
+    thread.start()
+
+    return json.dumps(
+        {
+            "job_id": job_id,
+            "status": "running",
+            "loop_name": loop_name,
+            "message": "Loop started. Use loop_status to check progress.",
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()

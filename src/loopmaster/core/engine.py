@@ -87,6 +87,7 @@ class LoopEngine:
         compatibility_policy: Any = None,
         model_registry: Any = None,
         model_policy: Any = None,
+        cancel_event: Any = None,
     ) -> None:
         self.error_policy = error_policy or ErrorPolicy()
         self.budget = budget
@@ -104,6 +105,7 @@ class LoopEngine:
         self._heartbeat: HeartbeatState | None = None
         self._last_checkpoint: CheckpointData | None = None
         self._resume_count: int = 0
+        self._cancel_event = cancel_event
 
     def on_step_complete(self, callback: Callable[[StepResult], None]) -> None:
         self._on_step_complete = callback

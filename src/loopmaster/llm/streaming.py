@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -12,6 +13,38 @@ from typing import Any
 from .types import LLMConfig, StreamChunk
 
 logger = logging.getLogger("loopmaster.llm.streaming")
+
+STREAM_CHUNK_TIMEOUT = 120.0  # seconds per chunk before declaring stall
+
+
+def _iter_with_chunk_timeout(resp: Any, timeout: float) -> Iterator[bytes]:
+    """Iterate over response lines with a per-chunk timeout to detect stalls."""
+    result: list[bytes] = []
+    exception: list[Exception] = []
+
+    def _reader():
+        try:
+            for raw_line in resp:
+                result.append(raw_line)
+        except Exception as exc:
+            exception.append(exc)
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    deadline = timeout
+    idx = 0
+    while reader_thread.is_alive() or idx < len(result):
+        if idx < len(result):
+            yield result[idx]
+            idx += 1
+        else:
+            reader_thread.join(timeout=min(1.0, deadline))
+            if not result[idx:] and not reader_thread.is_alive():
+                break
+
+    if exception:
+        raise exception[0]
 
 
 def stream_openai_compatible(
@@ -48,7 +81,8 @@ def stream_openai_compatible(
         total_tokens = 0
         model_used = config.model
 
-        for raw_line in resp:
+        chunk_timeout = getattr(config, "timeout", STREAM_CHUNK_TIMEOUT)
+        for raw_line in _iter_with_chunk_timeout(resp, chunk_timeout):
             line = raw_line.decode("utf-8").strip()
             if not line or line.startswith(":"):
                 continue
@@ -174,7 +208,8 @@ def stream_anthropic(
     }
     try:
         current_event: str = ""
-        for raw_line in resp:
+        chunk_timeout = getattr(config, "timeout", STREAM_CHUNK_TIMEOUT)
+        for raw_line in _iter_with_chunk_timeout(resp, chunk_timeout):
             line = raw_line.decode("utf-8").strip()
             if not line or line.startswith(":"):
                 continue
@@ -226,7 +261,8 @@ def stream_google(
         completion_tokens = 0
         total_tokens = 0
 
-        for raw_line in resp:
+        chunk_timeout = getattr(config, "timeout", STREAM_CHUNK_TIMEOUT)
+        for raw_line in _iter_with_chunk_timeout(resp, chunk_timeout):
             line = raw_line.decode("utf-8").strip()
             if not line or line.startswith(":"):
                 continue

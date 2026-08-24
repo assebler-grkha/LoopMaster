@@ -53,6 +53,22 @@ def _run_streaming_step(
         stream_iter = llm_client.stream_complete(resolved_prompt)
 
     for chunk in stream_iter:
+        if step.timeout and (time.monotonic() - start) > step.timeout:
+            full_text = "".join(chunks)
+            duration = (time.monotonic() - start) * 1000
+            return StepResult(
+                step_name=step.name,
+                success=False,
+                output=full_text,
+                input_tokens=total_in,
+                output_tokens=total_out,
+                tokens_used=total_in + total_out,
+                cost=0.0,
+                duration_ms=duration,
+                model=resp_model,
+                error=f"Step '{step.name}' timed out after {step.timeout}s",
+            )
+
         delta_text = getattr(chunk, "delta", getattr(chunk, "text", ""))
         if delta_text:
             chunks.append(delta_text)
@@ -111,12 +127,28 @@ def _run_sync_step(
 ) -> StepResult:
     """Execute a synchronous LLM call for a step."""
     start = time.monotonic()
+    timeout = getattr(step, "timeout", None)
+
     try:
         resp = llm_client.complete(resolved_prompt, model=step.model)
     except TypeError:
         resp = llm_client.complete(resolved_prompt)
 
     duration = (time.monotonic() - start) * 1000
+    if timeout and duration / 1000 > timeout:
+        return StepResult(
+            step_name=step.name,
+            success=False,
+            output="",
+            input_tokens=0,
+            output_tokens=0,
+            tokens_used=0,
+            cost=0.0,
+            duration_ms=duration,
+            model=step.model or "unknown",
+            error=f"Step '{step.name}' timed out after {timeout}s",
+        )
+
     model_used = resp.model or step.model or "gpt-4o"
     cost = 0.0
     if cost_tracker:

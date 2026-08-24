@@ -63,7 +63,12 @@ def _cm_stdio(method: str, params: dict) -> dict:
     )
     notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
     payload = (init_msg + "\n" + notif + "\n" + call_msg + "\n").encode()
-    stdout, _ = proc.communicate(input=payload, timeout=30)
+    try:
+        stdout, _ = proc.communicate(input=payload, timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return {"error": "codebase-memory timed out after 30s"}
     for line in reversed(stdout.decode(errors="replace").strip().splitlines()):
         try:
             obj = json.loads(line)
