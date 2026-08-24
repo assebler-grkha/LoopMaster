@@ -79,7 +79,7 @@ Start with the first line of code."""
 PROMPT_COMPARE = """\
 You are a code quality analyst. Compare these aislop scan results.
 
-BASELINE SCORE: {aislop_scan.stdout}
+BASELINE SCORE: {aislop_scan_baseline.stdout}
 AFTER REFACTOR: {aislop_scan_after_refactor.stdout}
 
 Did the score improve?

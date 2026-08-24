@@ -41,7 +41,7 @@ engine = LoopEngine(
 engine.register(loop_def)
 
 context = {
-    "path": "loops/",
+    "path": "tests/test_target_refactor.py",
     "project": "C-Projects-Ideas-LoopMaster",
 }
 

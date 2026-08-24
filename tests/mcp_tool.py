@@ -80,7 +80,7 @@ DISPATCH = {
     "write_file": lambda a: tool_write_file(
         a["file_path"],
         a["content"],
-        a.get("backup", "true").lower() == "true",
+        str(a.get("backup", "true")).lower() == "true",
     ),
     "read_file": lambda a: tool_read_file(a["file_path"]),
     "run_tests": lambda a: tool_run_tests(a.get("test_path", ".")),
