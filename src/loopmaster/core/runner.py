@@ -123,7 +123,7 @@ def run_step_block(bctx: BlockExecContext, block: Any) -> None:
             return
 
         if bctx.engine._cancel_event and bctx.engine._cancel_event.is_set():
-            raise InterruptedError(f"Loop cancelled by user")
+            raise InterruptedError("Loop cancelled by user")
 
         check_budget_limits(
             bctx.engine.budget,
