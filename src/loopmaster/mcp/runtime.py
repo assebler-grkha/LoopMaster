@@ -6,6 +6,8 @@ import threading
 
 from fastmcp import FastMCP
 
+from loopmaster import hooks as _hooks
+from loopmaster.hooks_builtin import register_builtins
 from loopmaster.mcp.job_store import get_job_store
 from loopmaster.mcp.worker import DetachedRunner
 
@@ -24,3 +26,6 @@ store.mark_interrupted_jobs_on_startup()
 runner = DetachedRunner(store)
 
 cancel_events: dict[str, threading.Event] = {}
+
+register_builtins()
+_user_hooks_loaded = _hooks.load_user_hooks()

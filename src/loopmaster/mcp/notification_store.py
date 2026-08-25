@@ -101,6 +101,20 @@ class NotificationStoreMixin(StoreHost):
                 self._write_critical_fallback()
         stored = self.get_notification(notif_id)
         assert stored is not None
+        with contextlib.suppress(Exception):
+            from loopmaster import hooks
+
+            hooks.trigger(
+                hooks.NOTIFICATION_CREATED,
+                {
+                    "notif_id": stored.notif_id,
+                    "priority": stored.priority,
+                    "event": stored.event,
+                    "summary": stored.summary,
+                    "job_id": stored.job_id,
+                    "detail": stored.detail,
+                },
+            )
         return stored
 
     def get_notification(self, notif_id: str) -> NotificationData | None:

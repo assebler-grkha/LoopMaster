@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import loopmaster.mcp.runtime as rt
+from loopmaster import hooks
 from loopmaster.mcp.discovery import (
     build_summary as _build_summary,
 )
@@ -237,6 +238,11 @@ def loop_save(loop_name: str, spec_json: str) -> str:
         loop_def, _spec = load_loop_from_dict(data)
     except SpecValidationError as exc:
         return json.dumps({"error": str(exc)})
+
+    try:
+        hooks.trigger(hooks.BEFORE_LOOP_SAVE, {"spec": data, "store": rt.store})
+    except hooks.HookVeto as exc:
+        return json.dumps({"error": f"rejected by hook: {exc}"})
 
     ref_error = validate_code_refs(data)
     if ref_error:

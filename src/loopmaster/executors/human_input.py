@@ -89,6 +89,30 @@ class HumanInputExecutor(BaseExecutor):
                 detail={"msg_id": msg_id, "from_addr": from_addr, "options": self.options},
             )
 
+    def _escalate(self, store: Any, job_id: str, text: str, msg_id: str, from_addr: str) -> None:
+        """Emit a critical escalation notification and fire hitl_escalation hooks."""
+        with contextlib.suppress(Exception):
+            store.create_notification(
+                priority="critical",
+                event="escalation",
+                summary=f"Unanswered input: {text[:120]}",
+                job_id=job_id,
+                detail={"msg_id": msg_id, "from_addr": from_addr},
+            )
+        with contextlib.suppress(Exception):
+            from loopmaster import hooks
+
+            hooks.trigger(
+                hooks.HITL_ESCALATION,
+                {
+                    "job_id": job_id,
+                    "step_name": self.step_name,
+                    "text": text,
+                    "msg_id": msg_id,
+                    "from_addr": from_addr,
+                },
+            )
+
     def _close_notification(self, store: Any, job_id: str) -> None:
         with contextlib.suppress(Exception):
             store.mark_job_notifications_read(job_id, event="waiting_input")
@@ -139,14 +163,7 @@ class HumanInputExecutor(BaseExecutor):
                 )
             if deadline is not None and time.time() >= deadline:
                 if self.on_timeout == "escalate":
-                    with contextlib.suppress(Exception):
-                        store.create_notification(
-                            priority="critical",
-                            event="escalation",
-                            summary=f"Unanswered input: {text[:120]}",
-                            job_id=job_id,
-                            detail={"msg_id": message.msg_id, "from_addr": from_addr},
-                        )
+                    self._escalate(store, job_id, text, message.msg_id, from_addr)
                     deadline = time.time() + timeout_s if timeout_s is not None else None
                     continue
                 break

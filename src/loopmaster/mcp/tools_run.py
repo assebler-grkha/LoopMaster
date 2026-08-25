@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import loopmaster.mcp.runtime as rt
+from loopmaster import hooks
 from loopmaster.core.engine import LoopEngine
 from loopmaster.core.policies import RecoveryAction
 from loopmaster.core.types import ErrorPolicy
@@ -53,6 +54,11 @@ def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
         ctx_data = json.loads(context) if isinstance(context, str) else dict(context)
     except Exception as exc:
         return json.dumps({"error": f"Invalid context JSON: {exc}"})
+
+    try:
+        hooks.trigger(hooks.BEFORE_LOOP_RUN, {"spec": data, "store": rt.store})
+    except hooks.HookVeto as exc:
+        return json.dumps({"error": f"rejected by hook: {exc}"})
 
     if mode == "agent":
         return _create_agent_job(data, spec, ctx_data)
