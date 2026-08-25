@@ -40,6 +40,12 @@ def _safe_eval_node(node: ast.AST, ctx_data: dict[str, Any]) -> Any:
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         return not _safe_eval_node(node.operand, ctx_data)
 
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        operand = _safe_eval_node(node.operand, ctx_data)
+        if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+            return -operand
+        raise ValueError("Unary minus requires a numeric operand")
+
     if isinstance(node, ast.BoolOp):
         if isinstance(node.op, ast.And):
             return all(_safe_eval_node(val, ctx_data) for val in node.values)

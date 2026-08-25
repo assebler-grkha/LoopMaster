@@ -262,11 +262,14 @@ def loop_cancel(job_id: str) -> str:
     job = _store.get_job(job_id)
     if not job:
         return f"Error: Job '{job_id}' not found."
+    # Persist 'cancelled' BEFORE setting the in-process event: the worker's
+    # except-branch reports cancelled only when it observes the flag, and a
+    # persisted failure first would make cancel_job refuse the update.
+    _store.cancel_job(job_id)
+    _runner.request_cancel(job_id)
     cancel_event = _cancel_events.get(job_id)
     if cancel_event:
         cancel_event.set()
-    _runner.request_cancel(job_id)
-    _store.cancel_job(job_id)
     return f"Loop '{job.loop_name}' cancelled."
 
 

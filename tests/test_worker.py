@@ -17,7 +17,7 @@ SHELL_OK = {
     "name": "worker-ok",
     "version": "1.0.0",
     "steps": [
-        {"type": "shell", "name": "greet", "command": "echo detached-worker-ok"},
+        {"type": "shell", "name": "greet", "command": ["python", "-c", "print('detached-worker-ok')"]},
     ],
 }
 
@@ -96,8 +96,8 @@ class TestDetachedRunner:
             **SHELL_OK,
             "name": "worker-multi",
             "steps": [
-                {"type": "shell", "name": "one", "command": "echo 1"},
-                {"type": "shell", "name": "two", "command": "echo 2"},
+                {"type": "shell", "name": "one", "command": ["python", "-c", "print(1)"]},
+                {"type": "shell", "name": "two", "command": ["python", "-c", "print(2)"]},
             ],
         }
         loop_def, spec = load_loop_from_dict(multi)
@@ -125,7 +125,7 @@ class TestRecollectFlag:
             calls.append(1)
 
         ld = LoopDef(name="py-recollect", version="1.0.0", body=body)
-        ld._collected_steps = [Step(name="x", executor=ShellExecutor(command="echo hi"))]
+        ld._collected_steps = [Step(name="x", executor=ShellExecutor(command=["python", "-c", "print('hi')"]))]
         engine = LoopEngine()
         engine.run(ld, initial_context={})
         assert ld._recollect_steps is True
@@ -204,13 +204,13 @@ class TestAdversarialFixes:
             "name": "worker-cancel-race",
             "version": "1.0.0",
             "steps": [
-                {"type": "shell", "name": "one", "command": "echo one"},
+                {"type": "shell", "name": "one", "command": ["python", "-c", "print('one')"]},
                 {
                     "type": "shell",
                     "name": "slow",
                     "command": ["python", "-c", "import time; time.sleep(5)"],
                 },
-                {"type": "shell", "name": "never", "command": "echo never"},
+                {"type": "shell", "name": "never", "command": ["python", "-c", "print('never')"]},
             ],
         }
         runner = DetachedRunner(store, poll_s=0.05)

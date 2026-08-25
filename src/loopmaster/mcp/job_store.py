@@ -237,14 +237,16 @@ class JobStore:
         definition: dict[str, Any],
         status: str = "ready",
         total_steps: int | None = None,
+        metrics: dict[str, Any] | None = None,
     ) -> JobData:
-        """Create a new persistent job."""
+        """Create a new persistent job (upsert: resets an existing row)."""
         now = time.time()
         steps_count = (
             total_steps
             if total_steps is not None
             else definition.get("step_count", len(definition.get("steps", [])))
         )
+        metrics = metrics or {}
         job = JobData(
             job_id=job_id,
             loop_name=loop_name,
@@ -255,6 +257,7 @@ class JobStore:
             results={},
             created_at=now,
             updated_at=now,
+            metrics=metrics,
         )
 
         with self._lock:
@@ -263,8 +266,20 @@ class JobStore:
                 """
                 INSERT INTO jobs (
                     job_id, loop_name, status, current_step, total_steps,
-                    definition, results, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    definition, results, created_at, updated_at,
+                    completed_at, error, metrics
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    loop_name = excluded.loop_name,
+                    status = excluded.status,
+                    current_step = 0,
+                    total_steps = excluded.total_steps,
+                    definition = excluded.definition,
+                    results = '{}',
+                    updated_at = excluded.updated_at,
+                    completed_at = NULL,
+                    error = NULL,
+                    metrics = excluded.metrics
                 """,
                 (
                     job.job_id,
@@ -276,6 +291,7 @@ class JobStore:
                     json.dumps(job.results, default=str),
                     job.created_at,
                     job.updated_at,
+                    json.dumps(metrics, default=str),
                 ),
             )
             self.conn.commit()
@@ -324,7 +340,8 @@ class JobStore:
             if metrics is not None:
                 job.metrics = metrics
             if completed:
-                job.status = "completed"
+                if status is None or status == "completed":
+                    job.status = "completed"
                 job.completed_at = now
             job.updated_at = now
 

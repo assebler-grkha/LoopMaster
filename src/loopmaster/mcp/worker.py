@@ -126,8 +126,8 @@ class DetachedRunner:
             definition=definition,
             status="running",
             total_steps=len(steps),
+            metrics={"host_pid": os.getpid(), "detached": True},
         )
-        self._store.update_job(job_id=job_id, metrics={"host_pid": os.getpid(), "detached": True})
 
         cancel_event = threading.Event()
         with self._lock:
@@ -196,24 +196,25 @@ class DetachedRunner:
         cancel_event: threading.Event,
     ) -> None:
         started = time.time()
-        engine = self._engine_factory(cancel_event)
-        engine.on_step_complete(lambda result: self._on_step(job_id, result))
         stop_watch = threading.Event()
-        watcher = threading.Thread(
-            target=self._watch_job,
-            args=(job_id, cancel_event, stop_watch),
-            name=f"lm-watch-{job_id}",
-            daemon=True,
-        )
-        watcher.start()
         try:
+            engine = self._engine_factory(cancel_event)
+            engine.on_step_complete(lambda result: self._on_step(job_id, result))
+            watcher = threading.Thread(
+                target=self._watch_job,
+                args=(job_id, cancel_event, stop_watch),
+                name=f"lm-watch-{job_id}",
+                daemon=True,
+            )
+            watcher.start()
             run_result = engine.run(loop_def, initial_context=ctx_data, job_id=job_id)
         except Exception as exc:  # noqa: BLE001 - worker boundary must persist failures
             logger.exception("Detached loop %s crashed", job_id)
+            cancelled = cancel_event.is_set()
             self._store.update_job(
                 job_id=job_id,
-                status="failed",
-                error=str(exc),
+                status="cancelled" if cancelled else "failed",
+                error="Cancelled by user request" if cancelled else str(exc),
                 metrics={"duration_ms": int((time.time() - started) * 1000)},
                 completed=True,
             )

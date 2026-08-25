@@ -15,7 +15,7 @@ from .state import (
     make_checkpoint,
 )
 from .step_executor import execute_step
-from .types import CheckpointData, Step, StepResult
+from .types import CheckpointData, Parallel, Step, StepResult
 
 logger = logging.getLogger("loopmaster.core.runner")
 
@@ -167,6 +167,11 @@ def run_step_block(bctx: BlockExecContext, block: Any) -> None:
                 bctx.results,
                 bctx.engine.checkpoint_dir,
             )
+    elif isinstance(block, Parallel):
+        # Sequential execution: BlockExecContext (results/ctx/totals) is shared and
+        # not thread-safe; true concurrency remains on the roadmap (ROADMAP.md).
+        for child in block.steps:
+            run_step_block(bctx, child)
     elif hasattr(block, "then_steps"):
         run_conditional_block(bctx, block)
 

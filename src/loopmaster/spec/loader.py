@@ -30,6 +30,8 @@ _RESERVED_PHASES = {
 }
 
 _PLACEHOLDER_RE = re.compile(r"\{\{?([a-zA-Z_][\w\.]*)\}?\}")
+_BRACE_CANDIDATE_RE = re.compile(r"\{[^{}]{0,80}\}")
+_PLAUSIBLE_REF_RE = re.compile(r"[A-Za-z0-9_.\- ]+")
 _ALLOWED_COND_NODES = (
     ast.Expression,
     ast.Constant,
@@ -40,6 +42,7 @@ _ALLOWED_COND_NODES = (
     ast.And,
     ast.Or,
     ast.Not,
+    ast.USub,
     ast.Eq,
     ast.NotEq,
     ast.Lt,
@@ -408,7 +411,7 @@ def _condition_ast_error(condition: str) -> str | None:
     Placeholders ({var}) are substituted with literal stubs before parsing
     because resolve_prompt replaces them with values prior to evaluation.
     """
-    probe = _PLACEHOLDER_RE.sub("'0'", condition.strip())
+    probe = _PLACEHOLDER_RE.sub("zz_ref_stub", condition.strip())
     try:
         tree = ast.parse(probe, mode="eval")
     except SyntaxError as exc:
@@ -423,7 +426,8 @@ def _condition_ast_error(condition: str) -> str | None:
 
 
 def _check_template_refs(template: str, known: dict[str, str], at: str, errors: list[str]) -> None:
-    """Validate {placeholder} references against known sources (A1/A6)."""
+    """Validate {placeholder} references against known sources (A1/A6/H2)."""
+    strict_spans = [m.span() for m in _PLACEHOLDER_RE.finditer(template)]
     for match in _PLACEHOLDER_RE.finditer(template):
         ref = match.group(1)
         root, _, leaf = ref.partition(".")
@@ -440,6 +444,36 @@ def _check_template_refs(template: str, known: dict[str, str], at: str, errors: 
                 at,
                 f"{{{ref}}} resolves to a raw result object; use '{{{ref}.stdout}}'",
             )
+    for cand in _BRACE_CANDIDATE_RE.finditer(template):
+        cand_start, cand_end = cand.span()
+        if any(cand_start >= s and cand_end <= e for (s, e) in strict_spans):
+            continue
+        inner = cand.group(0)[1:-1].strip()
+        if not inner or not _PLAUSIBLE_REF_RE.fullmatch(inner):
+            continue
+        _err(
+            errors,
+            at,
+            f"'{cand.group(0)}' looks like a reference but is invalid — "
+            "names must match [a-zA-Z_][word chars/dots], e.g. '{step_name.stdout}'",
+        )
+
+
+def _collect_strings(value: Any) -> list[str]:
+    """Recursively collect string leaves from JSON-ish structures."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        out: list[str] = []
+        for item in value.values():
+            out.extend(_collect_strings(item))
+        return out
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_collect_strings(item))
+        return out
+    return []
 
 
 def _walk_semantics(
@@ -467,10 +501,43 @@ def _walk_semantics(
             if isinstance(prompt, str):
                 _check_template_refs(prompt, known, at, errors)
 
+        elif ntype == "shell":
+            command = node.get("command")
+            for item in [command] if isinstance(command, str) else list(command or []):
+                if isinstance(item, str):
+                    _check_template_refs(item, known, at, errors)
+            for env_value in (node.get("env") or {}).values():
+                if isinstance(env_value, str):
+                    _check_template_refs(env_value, known, at, errors)
+
+        elif ntype == "http":
+            url = node.get("url")
+            if isinstance(url, str):
+                _check_template_refs(url, known, at, errors)
+            for header_value in (node.get("headers") or {}).values():
+                if isinstance(header_value, str):
+                    _check_template_refs(header_value, known, at, errors)
+            for text in _collect_strings(node.get("json_data")):
+                _check_template_refs(text, known, at, errors)
+            data_field = node.get("data")
+            if isinstance(data_field, str):
+                _check_template_refs(data_field, known, at, errors)
+
+        elif ntype == "mcp":
+            for text in _collect_strings(node.get("arguments")):
+                _check_template_refs(text, known, at, errors)
+
         elif ntype == "parallel":
-            reg_kids = _walk_semantics(node.get("steps") or [], dict(known), errors, f"{at}.steps")
-            known.update(reg_kids)
-            registered.update(reg_kids)
+            # Children run concurrently: siblings must not reference each
+            # other's outputs; only the enclosing scope is visible. Merge all
+            # registrations AFTER the loop so later siblings stay blind to
+            # earlier ones.
+            sibling_merged: dict[str, str] = {}
+            for j, child in enumerate(node.get("steps") or []):
+                reg_child = _walk_semantics([child], dict(known), errors, f"{at}.steps[{j}]")
+                sibling_merged.update(reg_child)
+            known.update(sibling_merged)
+            registered.update(sibling_merged)
 
         elif ntype == "conditional":
             condition = node.get("condition")
