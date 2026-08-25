@@ -3,7 +3,6 @@
 import os
 import sys
 
-
 if __name__ == "__main__":
     os.environ["LOOPMASTER_LLM_PROVIDER"] = "openrouter"
     os.environ["LOOPMASTER_LLM_MODEL"] = "stealth/ox-alpha"
@@ -15,9 +14,7 @@ if __name__ == "__main__":
 
     spec = __import__("importlib").util.spec_from_file_location(
         "refactor_loop",
-        os.path.join(
-            os.path.dirname(__file__), "..", "loops", "scenario13_refactor_loop.py"
-        ),
+        os.path.join(os.path.dirname(__file__), "..", "loops", "scenario13_refactor_loop.py"),
     )
     module = __import__("importlib").util.module_from_spec(spec)
     spec.loader.exec_module(module)

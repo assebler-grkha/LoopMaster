@@ -42,9 +42,11 @@ def _pid_alive(pid: int | None) -> bool:
         except (OSError, ProcessLookupError):
             return False
 
+
 from fastmcp import FastMCP
 
 from loopmaster.core.engine import LoopEngine
+from loopmaster.core.policies import RecoveryAction
 from loopmaster.core.types import ErrorPolicy
 from loopmaster.core.types import LoopDef as LoopDefType
 from loopmaster.cost.tracker import CostTracker
@@ -280,12 +282,19 @@ def _find_target_loop_def(
 
 
 def _format_completed_results(run_result: Any) -> dict[str, Any]:
-    """Format step results into serializable dict."""
-    return {
-        name: (res.output.content if hasattr(res.output, "content") else res.output)
-        for name, res in run_result.results.items()
-        if res.success
-    }
+    """Format step results into serializable dict (failures included)."""
+    out: dict[str, Any] = {}
+    for name, res in run_result.results.items():
+        value = res.output.content if hasattr(res.output, "content") else res.output
+        if res.success:
+            out[name] = value
+        else:
+            out[name] = {
+                "success": False,
+                "output": value,
+                "error": getattr(res, "error", None),
+            }
+    return out
 
 
 def _handle_run_completion(
@@ -406,7 +415,11 @@ def loop_run(
         start_time = time.time()
         engine = LoopEngine(
             budget=target_loop_def.budget,
-            error_policy=ErrorPolicy(),
+            error_policy=ErrorPolicy(
+                retry=2,
+                on_failure=RecoveryAction.SKIP,
+                fallback_model="@smart",
+            ),
             interruption_protection=target_loop_def.interruption_protection,
             cost_tracker=CostTracker(),
             metrics_collector=MetricsCollector(),

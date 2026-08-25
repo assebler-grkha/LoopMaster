@@ -42,7 +42,8 @@ PROJECT: {project}
 CODEBASE CONTEXT:
 {gather_context.stdout}
 
-SOURCE CODE (if available):
+SOURCE CODE (if available; if a literal placeholder appears here,
+the source was unavailable — proceed without it):
 {read_sources.stdout}
 
 PREVIOUS ADRs (if any):
@@ -86,7 +87,8 @@ GOAL: {goal}
 PROPOSAL from Architect A:
 {architect_a_propose}
 
-SOURCE CODE:
+SOURCE CODE (if unavailable or a literal placeholder appears below,
+critique based on the proposal text alone):
 {read_sources.stdout}
 
 Critique this proposal thoroughly. Specifically address:
@@ -256,7 +258,10 @@ def arch_debate(ctx):
         model=MODEL,
         prompt=(
             "Given this JSON search result, extract the FIRST qualified_name "
-            "field. Return ONLY the qualified name string, nothing else.\n\n"
+            "field. Reply with ONLY the qualified name as a single token with "
+            "no spaces, no quotes, no explanation. If the result contains no "
+            "qualified_name, is an error message, or the project appears not "
+            "indexed, reply exactly: NONE\n\n"
             "{gather_context.stdout}"
         ),
     )

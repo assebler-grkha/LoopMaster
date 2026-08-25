@@ -3,7 +3,6 @@
 import os
 import sys
 
-
 if __name__ == "__main__":
     # Set environment variables
     os.environ["LOOPMASTER_LLM_PROVIDER"] = "openrouter"
@@ -18,9 +17,7 @@ if __name__ == "__main__":
     # Import the loop definition
     spec = __import__("importlib").util.spec_from_file_location(
         "arch_debate_loop",
-        os.path.join(
-            os.path.dirname(__file__), "..", "loops", "scenario12_arch_debate.py"
-        ),
+        os.path.join(os.path.dirname(__file__), "..", "loops", "scenario12_arch_debate.py"),
     )
     module = __import__("importlib").util.module_from_spec(spec)
     spec.loader.exec_module(module)
