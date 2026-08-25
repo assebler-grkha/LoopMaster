@@ -2,7 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-374%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-608%20passing-brightgreen.svg)](#development)
 [![aislop](https://img.shields.io/badge/aislop-100%2F100%20healthy-brightgreen.svg)](#project-quality)
 
 **Production-grade runtime engine and orchestrator for AI agent loops.**
@@ -422,14 +422,26 @@ result = runner.run(loop_def, {})
 Export your loop definition to YAML for documentation or visualization:
 
 ```bash
-loop-engine export my_loop.py
+loop-engine export my_loop.py                        # YAML (legacy)
+loop-engine export my_loop.py --format json -o loop.json
+```
+
+Also available for loops stored as code blocks (CLI thin shims):
+
+```bash
+loop-engine block add  my-block 1.0.0 --lang python --source block.py --caps net
+loop-engine block get  my-block@1.0.0
+loop-engine block list [pattern]
 ```
 
 Or programmatically:
 
 ```python
 from loopmaster.core.yaml_export import export_loop
+from loopmaster.spec.compiler import compile_loop_file
+
 yaml_str = export_loop(loop_def)
+spec_dict = compile_loop_file("my_loop.py")    # LoopSpec v1 JSON dict
 ```
 
 ### JSON Loop Engine (LoopSpec v1)
@@ -536,16 +548,24 @@ python scripts/loopmaster_mcp.py
 ### Persistent SQLite JobStore
 MCP jobs are backed by a thread-safe WAL SQLite database (`.loopmaster/jobs.db`), ensuring job state and results survive server restarts.
 
-### Supported MCP Tools
+### Supported MCP Tools (17)
 
 | Tool | Description |
 |---|---|
-| `loop_run` | Execute or start an asynchronous persistent loop job |
-| `loop_status` | Query execution status, current step, and progress (0.0–1.0) |
-| `loop_result` | Retrieve full outputs, token counts, and cost breakdowns |
-| `loop_cancel` | Cancel an active running job |
+| `loop_run` | Execute a loop — `mode="detached"` (JSON engine, returns `job_id` immediately) or `mode="agent"` (creates `ready` job, agent drives via `loop_record`) |
+| `loop_status` | Query execution status, current step, progress (0.0–1.0), error/metrics, HITL questions when `waiting_input` |
+| `loop_result` | *Legacy* Python-DSL path: agent reports step result and receives next step |
+| `loop_record` | Agent-mode: record step result for a `ready`/`in_progress` job (validates `step_name` against plan, supports `finalize` for conditionals) |
+| `loop_cancel` | Cancel an active job (`failed`/`cancelled` terminal guard, worker observes via DB poll) |
 | `loop_list` | List available loops discovered across the workspace |
 | `loop_get` | Get structural details, step definitions, and budget limits |
+| `loop_save` | Persist a `LoopSpec v1` JSON spec in SQLite (`loops` table) |
+| `loop_delete` | Delete a saved loop spec |
+| `block_add` / `block_get` / `block_list` | Manage reusable code blocks (Python/shell, SHA-256 pinned, subprocess-only) |
+| `loop_questions` | List open HITL questions (`pending`) with sweep of expired ones |
+| `loop_respond` | Answer a HITL question (`already_answered` guard, `job_id` cross-check) |
+| `loop_inbox` | Poll notifications outbox (`info`/`needs_input`/`critical`, `pending_notifications` marker on every tool response) |
+| `model_list` / `model_recommend` | Registry introspection & cost-aware routing |
 
 ---
 
@@ -711,10 +731,24 @@ loopmaster/
 ├── templates/             # Loop templates
 │   └── __init__.py        # 7 templates + code generation
 ├── mcp/                   # Persistent JobStore & Discovery
-│   ├── job_store.py       # WAL SQLite persistent job storage
+│   ├── job_store.py       # Composition root (WAL SQLite, re-exports)
+│   ├── store_models.py    # StoreHost, data classes, row converters
+│   ├── job_ops.py         # Job CRUD, terminal guards, reaper
+│   ├── loop_store.py      # Loop spec persistence
+│   ├── code_store.py      # Code block persistence
+│   ├── message_store.py   # HITL messages (ask/answer)
+│   ├── notification_store.py # Notifications outbox + archive
+│   ├── worker.py          # DetachedRunner, watcher, heartbeat
+│   ├── runtime.py         # FastMCP instance, store/runner singletons
+│   ├── tools_*.py         # MCP tool groups (loops/run/hitl/blocks/notifications)
 │   └── discovery.py       # Loop discovery and recursive serialization
+├── spec/                  # LoopSpec v1 (JSON engine)
+│   ├── loader.py          # JSON validation, semantic checks, LoopDef builder
+│   └── compiler.py        # Python DSL → LoopSpec v1 compiler
 └── cli/                   # Command-line interface
-    └── app.py             # Typer CLI commands
+    ├── app.py             # Typer CLI commands
+    ├── json_loop.py       # JSON plan printing
+    └── blocks.py          # block add/get/list sub-commands
 ```
 
 ---
@@ -744,10 +778,10 @@ npx aislop scan
 
 ### Project Quality
 
-- **362 tests** passing across 29 test suites (100% pass rate)
+- **608 tests** passing (100% pass rate)
 - **aislop score: 100/100 Healthy**
 - Modular architecture (all files under 370 lines, all functions under 70 lines, parameter counts <= 6)
-- Pure Python standard library foundation with zero external runtime dependencies
+- Pure Python standard library foundation with zero external runtime dependencies (only FastMCP for MCP server)
 
 ---
 

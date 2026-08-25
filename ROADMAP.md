@@ -2,11 +2,11 @@
 
 ## Текущее состояние
 
-- MCP-сервер: **6 инструментов** (loop_list, loop_get, loop_result, loop_status, loop_cancel, loop_run)
-- **loop_run**: выполнение циклов через LLM API с env-based провайдерами
-- Multi-provider LLM client: OpenAI, Anthropic, Google, OpenRouter, Custom
-- Тестовые циклы: simple_test, error_handling_test
-- **Ветка `refactor/json-loop-engine` (рефакторинг "JSON Loop Engine", ADR-011)**: LoopSpec v1 (JSON-конфигурации циклов: llm/shell/http/mcp/code/human + parallel/conditional), LoopStore + detached-воркер в процессе MCP, CodeBlockStore (sha256-pinning, subprocess-only), HITL-протокол (loop_respond/loop_questions, waiting_input), Notifications outbox (loop_inbox, pending_notifications маркер), компилятор Python→JSON (`export --format json`). MCP-инструменты расширены до 15+.
+- MCP-сервер: **17 инструментов** (loops: loop_list/get/save/delete/run/status/cancel/record + legacy loop_result; blocks: block_add/get/list; HITL: loop_questions/respond; notifications: loop_inbox; models: model_list/recommend) — см. `docs/AGENTS.md`
+- **loop_run**: два режима — `detached` (движок крутит цикл в daemon-потоке, чекпоинты + heartbeat) и `agent` (движок — учёт прогресса, агент шагает сам через `loop_record`)
+- Multi-provider LLM client: OpenAI, Anthropic, Google, OpenRouter, Custom (detached), + OpenCode-as-provider (agent)
+- Тестовые циклы: 608 тестов, aislop 100/100
+- **JSON Loop Engine (ADR-011) — MERGED в main (19ec110)**: LoopSpec v1 (llm/shell/http/mcp/code/human + parallel/conditional), WAL JobStore + LoopStore/CodeBlockStore/HITL/messages/notifications, detached воркер + watcher/lease/heartbeat, HITL (waiting_input → loop_respond), Notifications outbox (`pending_notifications` в каждом ответе + `loop_inbox` + critical fallback), компилятор Python→JSON (`loop-engine export --format json`, `loop-engine block add/get/list`)
 
 ## Цель
 

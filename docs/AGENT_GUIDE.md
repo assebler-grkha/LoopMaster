@@ -77,11 +77,59 @@ Want me to run it?
 
 ---
 
-## 3. Model Discovery via MCP Server
+## 3. Model Discovery & Loop Execution via MCP Server
 
-When designing or configuring loops dynamically, query available and approved models via MCP tools:
+LoopMaster exposes **17 MCP tools** in 5 groups. All are available when the MCP server is running.
 
-### `model_list`
+### 3.1 Loops — discovery & execution
+
+| Tool | Purpose |
+|------|---------|
+| `loop_list` | Discover available loops (Python DSL files) |
+| `loop_get` | Get full DSL definition + job_id for agent execution |
+| `loop_save` | Persist a JSON LoopSpec (LoopSpec v1) to the store |
+| `loop_delete` | Remove a persisted JSON loop |
+| `loop_run` | Start a loop: `mode="detached"` (engine runs it) or `mode="agent"` (you drive it) |
+| `loop_status` | Poll progress, results, stale/owner-dead detection |
+| `loop_cancel` | Cancel a running/detached job |
+| `loop_result` | **Legacy** — report a DSL step result (use `loop_record` for JSON loops) |
+| `loop_record` | Report a JSON-loop step result (`finalize=true` for conditional branches) |
+
+**Execution models:**
+
+- **Detached** (`mode="detached"`, default for JSON): engine runs `ShellExecutor`/`CodeBlockExecutor`/`HumanInputExecutor`/`HttpExecutor` in a daemon thread inside the MCP process. You poll `loop_status` until `completed`/`failed`/`waiting_input`.
+- **Agent** (`mode="agent"`): engine creates a `ready` job and does nothing. You walk the steps yourself (LLM calls are your model) and call `loop_record(job_id, step_name, success, output, error, finalize?)` for each leaf. `finalize=true` on the last record of a `Conditional` branch (otherwise `total_steps` counts both branches and auto-complete never fires).
+
+### 3.2 HITL — human-in-the-loop
+
+| Tool | Purpose |
+|------|---------|
+| `loop_questions` | List pending questions (`waiting_input` jobs) |
+| `loop_respond` | Answer a question (`job_id` is validated against `msg.job_id`) |
+
+Flow: JSON loop reaches a `human` node → job goes `waiting_input`, `loop_status` attaches the question, notification `needs_input/waiting_input` is emitted → you call `loop_respond`; on timeout `on_timeout` policy fires (`default_answer`/`skip`/`fail`/`escalate`→critical notification).
+
+### 3.3 Code Blocks — reusable code
+
+| Tool | Purpose |
+|------|---------|
+| `block_add` | Register a versioned code block (`name@version`, `language: python|shell`, SHA-256 pinned) |
+| `block_get` | Fetch block metadata + source + `verified_sha256` |
+| `block_list` | List blocks (optional LIKE pattern) |
+
+Blocks run `subprocess-only` via `CodeBlockExecutor` with streaming 1 MiB stdout limit, minimal env, and `deny_capabilities` enforcement at both save-time and exec-time.
+
+### 3.4 Notifications — outbox
+
+| Tool | Purpose |
+|------|---------|
+| `loop_inbox` | Poll unread notifications (`info`/`needs_input`/`critical`), auto-marks read; also sweeps expired messages to `archive/messages-YYYYMM.jsonl` |
+
+Every tool response carries `pending_notifications: {info, needs_input, critical}`. Critical notifications also mirror to `.loopmaster/inbox/critical.json`.
+
+### 3.5 Models — discovery
+
+#### `model_list`
 Lists all registered models, their active API key statuses, context windows, and token pricing.
 ```json
 // MCP Tool Call: model_list
@@ -104,7 +152,7 @@ Lists all registered models, their active API key statuses, context windows, and
 }
 ```
 
-### `model_recommend`
+#### `model_recommend`
 Ask LoopMaster to recommend the optimal model for a specific task and token budget:
 ```json
 // MCP Tool Call: model_recommend

@@ -457,7 +457,7 @@ print(result)
 | Документ | Содержание |
 |----------|-----------|
 | [`AGENT_GUIDE.md`](AGENT_GUIDE.md) | Выбор моделей, алиасы (@fast, @smart, @coding), best practices |
-| [`AGENTS.md`](AGENTS.md) | Полный справочник MCP-инструментов (loop_list, loop_run, loop_result) |
+| [`AGENTS.md`](AGENTS.md) | Полный справочник 17 MCP-инструментов (loops/blocks/HITL/inbox/models) |
 | [`loops/`](../loops/) | Примеры готовых циклов (simple, error_handling, conditional, parallel) |
 
 ---

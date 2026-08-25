@@ -36,11 +36,13 @@ LoopMaster is a **Python runtime engine** for AI agent loops. It executes `@Loop
 - A monitoring system (tracks costs/metrics but no dashboards)
 
 **It IS:**
-- A Python DSL: `@Loop` + `Step()` + `Parallel()`
-- A CLI: `loop-engine` commands
-- A runtime: error recovery, budget enforcement, checkpoint/resume
+- A Python DSL: `@Loop` + `Step()` + `Parallel()` + `Conditional()`
+- A JSON engine: LoopSpec v1 (`schemas/loopspec-v1.schema.json`, `spec/loader.py` + `compiler.py`)
+- A CLI: `loop-engine` commands (incl. `export --format json`, `block add/get/list`)
+- A runtime: error recovery, budget enforcement, checkpoint/resume, detached & agent execution modes
 - An adapter system: OpenCode, Claude Code, Cursor integration
-- A metrics system: cost tracking + SQLite export
+- A metrics system: cost tracking + SQLite export (WAL `JobStore` + notifications outbox)
+- An MCP server: 17 tools (loops, blocks, HITL, inbox, models)
 
 **Installation:**
 ```bash
@@ -206,6 +208,10 @@ engine = LoopEngine(
 | `loop-engine checkpoints NAME` | List checkpoints | `loop-engine checkpoints my-loop` |
 | `loop-engine templates` | List available templates | `loop-engine templates` |
 | `loop-engine export FILE` | Export to YAML | `loop-engine export my_loop.py` |
+| `loop-engine export FILE --format json` | Compile to LoopSpec v1 JSON | `loop-engine export my_loop.py --format json -o loop.json` |
+| `loop-engine block add NAME VER` | Register code block (DB, SHA-256 pinned) | `loop-engine block add my-block 1.0.0 --lang python --source block.py` |
+| `loop-engine block get REF` | Get block metadata + source | `loop-engine block get my-block@1.0.0` |
+| `loop-engine block list [PATTERN]` | List registered blocks | `loop-engine block list` |
 | `loop-engine docs` | Open documentation | `loop-engine docs` |
 
 **Output of `run`:**
@@ -217,41 +223,59 @@ engine = LoopEngine(
 
 ## MCP Tools — OpenCode as Provider
 
-LoopMaster exposes loop definitions via MCP. **OpenCode IS the LLM provider** — it reads loop definitions and executes each step using its own model capabilities.
+LoopMaster exposes **17 MCP tools** in 5 groups. Two execution models exist:
 
-### Execution Model
+- **Detached** (`loop_run` with `mode="detached"` or JSON `loop_save` → `loop_run`): engine runs the loop in a daemon thread inside the MCP process (shell/code/human/http/mcp executors). You poll `loop_status` until `completed`/`failed`/`waiting_input`. Checkpoints are written to `.loopmaster/checkpoints`, heartbeats keep `updated_at` fresh, stale/owner-dead detection reaps zombies.
+- **Agent** (`loop_run` with `mode="agent"` or legacy `loop_get` → `loop_result`): **OpenCode IS the LLM provider** — it reads the spec and walks the steps itself, calling `loop_record` per leaf. `finalize=true` on the last record of a `Conditional` branch is required (both branches count toward `total_steps`). All responses carry `pending_notifications`.
+
+### Detached execution
+
+```
+User → "Run the shell pipeline (JSON)"
+  ↓
+OpenCode: loop_save(name, spec_json) → loop_run(spec_json, mode="detached")
+  ↓
+Engine thread: ShellExecutor / CodeBlockExecutor / HumanInputExecutor / …
+  ↓
+OpenCode polls loop_status(job_id) → {status, progress, results, error, metrics}
+  → on waiting_input also {question}, on error also {error}
+```
+
+### Agent execution (legacy + JSON)
 
 ```
 User → "Run the research loop"
   ↓
-OpenCode calls loop_list → finds available loops
+OpenCode: loop_get("research")  [DSL]  or  loop_run(spec_json, mode="agent") [JSON]
   ↓
-OpenCode calls loop_get("research") → gets full definition:
-  - Step 1: model="gpt-4", prompt="Search for {topic}"
-  - Step 2: model="gpt-4", prompt="Analyze {search}"
-  - Step 3: model="gpt-4", prompt="Summarize {analyze}"
+OpenCode executes Step 1 with its own model → loop_record(job_id, "search", success=True, output="...")
   ↓
-OpenCode executes Step 1 using its own LLM → gets result
-OpenCode calls loop_result(job_id, "search", success=True, output="...")
+… repeat per leaf step, finalize=true on last branch step …
   ↓
-OpenCode executes Step 2 using its own LLM → gets result
-OpenCode calls loop_result(job_id, "analyze", success=True, output="...")
-  ↓
-OpenCode executes Step 3 using its own LLM → gets result
-OpenCode calls loop_result(job_id, "summarize", success=True, output="...")
-  ↓
-Loop complete. OpenCode reports final summary to user.
+Loop complete (status completed). OpenCode reports summary.
 ```
 
-### Available Tools
+### Available Tools (17)
 
-| Tool | Description | Input | Output |
-|------|-------------|-------|--------|
-| `loop_list` | Discover available loops | `{search_dir?}` | List of loops with names, versions, step counts |
-| `loop_get` | Get full loop definition | `{loop_name, search_dir?}` | Complete step-by-step definition + job_id |
-| `loop_result` | Report step execution result | `{job_id, step_name, success, output?, error?}` | Next step or completion status |
-| `loop_status` | Check execution progress | `{job_id}` | Progress, results, status |
-| `loop_cancel` | Cancel loop execution | `{job_id}` | Confirmation |
+| Group | Tool | Description | Key Input |
+|-------|------|-------------|-----------|
+| Loops | `loop_list` | Discover DSL loops on disk | `{search_dir?}` |
+| Loops | `loop_get` | Get full DSL definition + job_id (agent walk) | `{loop_name, search_dir?}` |
+| Loops | `loop_save` | Persist a JSON LoopSpec v1 | `{loop_name, spec_json}` |
+| Loops | `loop_delete` | Delete a persisted JSON loop | `{loop_name}` |
+| Loops | `loop_run` | Start a JSON loop (`mode`: `detached`\|`agent`, `spec_json`, `context`) | `{spec_json?, loop_name?, mode?, context?}` |
+| Loops | `loop_status` | Poll progress + results + question if waiting | `{job_id}` |
+| Loops | `loop_cancel` | Cancel a running/detached job | `{job_id}` |
+| Loops | `loop_record` | Record a JSON-loop step (agent mode, `finalize?`) | `{job_id, step_name, success?, output?, error?, finalize?}` |
+| Loops | `loop_result` | **Legacy** DSL step report (use `loop_record` for JSON) | `{job_id, step_name, success, output?, error?}` |
+| Blocks | `block_add` | Register versioned code block (SHA-256 pinned) | `{name, version, language, source, capabilities?, description?}` |
+| Blocks | `block_get` | Fetch block metadata + source | `{ref}` |
+| Blocks | `block_list` | List blocks | `{pattern?}` |
+| HITL | `loop_questions` | List pending questions | `{job_id?}` |
+| HITL | `loop_respond` | Answer a question (`job_id` validated) | `{job_id, msg_id, answer}` |
+| Notify | `loop_inbox` | Poll notifications (`info`/`needs_input`/`critical`), auto-marks read | `{unread_only?, limit?, mark_read?}` |
+| Models | `model_list` | List registered models + pricing | `{}` |
+| Models | `model_recommend` | Recommend model for task/budget | `{task, prompt_tokens?, remaining_budget?}` |
 
 ### Tool Details
 
