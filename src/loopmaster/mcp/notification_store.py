@@ -215,29 +215,33 @@ class NotificationStoreMixin(StoreHost):
                 (cutoff,),
             )
             rows = cur.fetchall()
-            if rows:
-                cur.execute(
-                    f"DELETE FROM messages WHERE msg_id IN ({', '.join('?' for _ in rows)})",
-                    [row["msg_id"] for row in rows],
+            if not rows:
+                cur.close()
+                return 0
+            if archive_dir is None:
+                db_path = getattr(self, "db_path", None)
+                archive_dir = (
+                    Path(db_path).parent / "archive"
+                    if db_path and str(db_path) != ":memory:"
+                    else None
                 )
+            if archive_dir is not None:
+                stamp = time.strftime("%Y%m")
+                try:
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    target = archive_dir / f"messages-{stamp}.jsonl"
+                    with open(target, "a", encoding="utf-8") as fh:
+                        for row in rows:
+                            fh.write(json.dumps(row_to_message(row).to_dict(), ensure_ascii=False))
+                            fh.write("\n")
+                except OSError as exc:
+                    logger.warning("message archive write failed (%s): %s", archive_dir, exc)
+                    cur.close()
+                    return 0
+            cur.execute(
+                f"DELETE FROM messages WHERE msg_id IN ({', '.join('?' for _ in rows)})",
+                [row["msg_id"] for row in rows],
+            )
             self.conn.commit()
             cur.close()
-        if not rows:
-            return 0
-        if archive_dir is None:
-            db_path = getattr(self, "db_path", None)
-            archive_dir = (
-                Path(db_path).parent / "archive" if db_path and str(db_path) != ":memory:" else None
-            )
-        if archive_dir is not None:
-            stamp = time.strftime("%Y%m")
-            try:
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                target = archive_dir / f"messages-{stamp}.jsonl"
-                with open(target, "a", encoding="utf-8") as fh:
-                    for row in rows:
-                        fh.write(json.dumps(row_to_message(row).to_dict(), ensure_ascii=False))
-                        fh.write("\n")
-            except OSError as exc:
-                logger.warning("message archive write failed (%s): %s", archive_dir, exc)
         return len(rows)

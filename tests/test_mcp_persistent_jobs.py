@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -119,3 +120,52 @@ class TestMCPPersistentJobs:
 
         job = store.get_job(job_id)
         assert job.status == "cancelled"
+
+
+class TestStaleDetection:
+    """M2: owner-dead/stale checks must cover the detached in_progress path."""
+
+    @staticmethod
+    def _mk_job(store: JobStore, job_id: str, status: str, updated_at: float, host_pid: int):
+        store.create_job(job_id=job_id, loop_name="l", definition={"step_count": 1}, status=status)
+        store.update_job(job_id, metrics={"host_pid": host_pid})
+        with store._lock:
+            cur = store.conn.cursor()
+            cur.execute("UPDATE jobs SET updated_at = ? WHERE job_id = ?", (updated_at, job_id))
+            store.conn.commit()
+            cur.close()
+
+    def test_in_progress_owner_dead_marked_failed(self, tmp_path):
+        store = _bind_store(tmp_path)
+        dead_pid = 999_999_999
+        self._mk_job(store, "j-dead", "in_progress", time.time(), dead_pid)
+
+        payload = json.loads(loop_status("j-dead"))
+
+        assert payload["status"] == "failed"
+        assert "exited before completion" in payload["error"]
+
+    def test_in_progress_live_owner_not_flagged(self, tmp_path):
+        store = _bind_store(tmp_path)
+        self._mk_job(store, "j-live", "in_progress", time.time() - 10, os.getpid())
+
+        payload = json.loads(loop_status("j-live"))
+
+        assert payload["status"] == "in_progress"
+
+    def test_in_progress_stale_no_heartbeat_marked_failed(self, tmp_path):
+        store = _bind_store(tmp_path)
+        self._mk_job(store, "j-stale", "in_progress", time.time() - 1000, os.getpid())
+
+        payload = json.loads(loop_status("j-stale"))
+
+        assert payload["status"] == "failed"
+        assert "stale" in payload["error"]
+
+    def test_waiting_input_excluded_from_stale(self, tmp_path):
+        store = _bind_store(tmp_path)
+        self._mk_job(store, "j-wait", "waiting_input", time.time() - 1000, 999_999_999)
+
+        payload = json.loads(loop_status("j-wait"))
+
+        assert payload["status"] == "waiting_input"

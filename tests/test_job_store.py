@@ -94,8 +94,19 @@ class TestJobStoreBasics:
             error="Rate limit exceeded",
         )
         assert j is not None
-        assert j.status == "error"
+        # Mid-run failure keeps the lifecycle status live (heartbeats continue);
+        # only the error field carries the failure.
+        assert j.status == "in_progress"
         assert j.error == "Rate limit exceeded"
+
+        j = store.record_step_result(
+            job_id="job-fail-test",
+            step_name="step_2",
+            success=True,
+        )
+        assert j is not None
+        # Fully recorded with failures -> legacy done-with-errors marker.
+        assert j.status == "error"
 
     def test_persistence_across_restarts(self, tmp_path: Path):
         db_file = tmp_path / "persistent.db"

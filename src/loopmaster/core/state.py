@@ -159,6 +159,8 @@ def apply_step_result(
         else:
             output_val = getattr(result.output, "content", result.output)
             ctx._data[step.name] = output_val
+    elif not result.success:
+        ctx._data[step.name] = None
 
     if heartbeat:
         ping_heartbeat(heartbeat)

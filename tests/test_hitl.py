@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
+import loopmaster.mcp.runtime as rt
+from loopmaster.core.context import Context
+from loopmaster.core.state import apply_step_result
+from loopmaster.core.types import Step, StepResult
 from loopmaster.executors.human_input import HumanInputExecutor
 from loopmaster.mcp.job_store import (
     JobStore,
@@ -13,6 +20,7 @@ from loopmaster.mcp.job_store import (
     get_job_store,
     parse_duration,
 )
+from loopmaster.mcp.tools_hitl import loop_respond
 from loopmaster.mcp.worker import DetachedRunner
 from loopmaster.spec.loader import load_loop_from_dict
 
@@ -252,6 +260,49 @@ class TestDetachedWaitingFlow:
         assert job.status == "cancelled"
         assert store.list_questions(status="cancelled")
 
+    def test_crash_between_pause_and_answer_is_safe(self, runner_env):
+        runner, store = runner_env
+        loop_def, spec = load_loop_from_dict(_hitl_spec(timeout="1h", on_timeout="skip"))
+        job_id = runner.submit(loop_def, initial_context=dict(spec.initial_context))
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if store.get_job(job_id).status == "waiting_input":
+                break
+            time.sleep(0.05)
+        questions = store.list_questions(job_id=job_id)
+        assert len(questions) == 1
+
+        with store._lock:
+            cur = store.conn.cursor()
+            cur.execute(
+                "UPDATE jobs SET metrics=? WHERE job_id=?",
+                (json.dumps({"host_pid": 999999999}), job_id),
+            )
+            store.conn.commit()
+            cur.close()
+
+        crashed = JobStore(db_path=store.db_path)
+        crashed.mark_interrupted_jobs_on_startup()
+        job = self._wait_terminal(crashed, job_id)
+        assert job.status == "interrupted"
+
+        orphaned = crashed.list_questions(job_id=job_id)
+        assert len(orphaned) == 1 and orphaned[0].status == "pending"
+
+        sha = hashlib.sha256(f"{job_id}|loop:hitl-demo#confirm".encode()).hexdigest()
+        assert orphaned[0].msg_id == sha
+
+        answered = crashed.answer_question(orphaned[0].msg_id, "yes")
+        assert answered.status == "answered"
+
+        resubmitted = crashed.create_job(
+            job_id=job_id,
+            loop_name="hitl-demo",
+            definition={"step_count": 1},
+            status="running",
+        )
+        assert resubmitted.status == "running"
+
     def test_loader_builds_human_executor(self):
         loop_def, spec = load_loop_from_dict(_hitl_spec(default_answer="no"))
         steps = list(loop_def._collected_steps)
@@ -259,3 +310,35 @@ class TestDetachedWaitingFlow:
         assert type(executor).__name__ == "HumanInputExecutor"
         assert executor.step_name == "confirm"
         assert executor.options == ["yes", "no"]
+
+
+class TestSkippedStepContext:
+    def test_failed_step_yields_null_in_context(self):
+        ctx = Context({})
+        step = Step(name="confirm", prompt="p")
+        res = StepResult(step_name="confirm", success=False, error="input timeout")
+        apply_step_result(SimpleNamespace(name="t"), step, res, ctx, [], {})
+        assert ctx._data["confirm"] is None
+
+    def test_successful_step_still_merges(self):
+        ctx = Context({})
+        step = Step(name="ok", prompt="p")
+        res = StepResult(step_name="ok", success=True, output={"v": 1})
+        apply_step_result(SimpleNamespace(name="t"), step, res, ctx, [], {})
+        assert ctx._data["v"] == 1
+
+
+class TestRespondJobGuard:
+    def test_respond_rejects_wrong_job_id(self, store, monkeypatch):
+        monkeypatch.setattr(rt, "store", store)
+        msg = store.create_question("j1", "loop:d#ask", text="Q?")
+        out = loop_respond(job_id="other-job", msg_id=msg.msg_id, answer="x")
+        assert "belongs to job 'j1'" in out
+        assert store.get_message(msg.msg_id).status == "pending"
+
+    def test_respond_accepts_matching_job_id(self, store, monkeypatch):
+        monkeypatch.setattr(rt, "store", store)
+        msg = store.create_question("j1", "loop:d#ask", text="Q?")
+        out = loop_respond(job_id="j1", msg_id=msg.msg_id, answer="yes")
+        assert '"responded": true' in out
+        assert store.get_message(msg.msg_id).status == "answered"

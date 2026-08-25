@@ -143,21 +143,28 @@ class JobStore(
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.RLock()
-        self._conn: sqlite3.Connection | None = None
+        with self._lock:
+            self._conn = self._open_conn()
         self._init_schema()
+
+    def _open_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        if str(self.db_path) != ":memory:":
+            cur = conn.cursor()
+            cur.execute("PRAGMA journal_mode = WAL;")
+            cur.execute("PRAGMA synchronous = NORMAL;")
+            cur.execute("PRAGMA busy_timeout = 5000;")
+            cur.close()
+        return conn
 
     @property
     def conn(self) -> sqlite3.Connection:
-        """Get or initialize the thread-safe SQLite connection."""
+        """Get the thread-safe SQLite connection (opened eagerly in __init__)."""
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            if str(self.db_path) != ":memory:":
-                cur = self._conn.cursor()
-                cur.execute("PRAGMA journal_mode = WAL;")
-                cur.execute("PRAGMA synchronous = NORMAL;")
-                cur.execute("PRAGMA busy_timeout = 5000;")
-                cur.close()
+            with self._lock:
+                if self._conn is None:
+                    self._conn = self._open_conn()
         return self._conn
 
     def _init_schema(self) -> None:

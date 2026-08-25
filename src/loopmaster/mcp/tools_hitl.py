@@ -44,6 +44,11 @@ def loop_respond(job_id: str, msg_id: str, answer) -> str:
     """Answer a pending HITL question so the waiting loop can resume."""
 
     try:
+        existing = rt.store.get_message(msg_id)
+        if existing is None:
+            return f"Error: Message '{msg_id}' not found."
+        if existing.job_id != job_id:
+            return f"Error: msg_id '{msg_id}' belongs to job '{existing.job_id}', not '{job_id}'."
         message = rt.store.answer_question(msg_id, answer, by="agent")
         with contextlib.suppress(Exception):
             rt.store.mark_job_notifications_read(message.job_id, event="waiting_input")

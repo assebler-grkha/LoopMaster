@@ -47,6 +47,8 @@ loop_respond(job_id, msg_id, answer="yes")
 
 Ключевое: **pause не потребляет ресурсов** — это чекпоинт + запись в БД. Падение процесса между паузой и ответом безопасно: resume находит pending question и ждёт дальше.
 
+> **Реализация v1 (осознанное отклонение):** ожидание — блокирующий poll внутри daemon-потока воркера (не checkpoint-pause). Поток удерживается на время ожидания; N одновременных waiting-jobs = N idle-потоков MCP-процесса. Безопасность падения сохранена: job в `waiting_input` с мёртвым host_pid помечается `interrupted` при старте нового сервера, pending question остаётся в messages, resubmit через upsert работает. Защита от исчерпания потоков — `DetachedRunner(max_concurrent=32)` (submit отказывает при превышении). Неблокирующее ожидание (checkpoint + watcher) — кандидат в v2.
+
 ## 3. Таймауты и политики
 
 `timeout` (ISO-8601 duration: `"30m"`, `"24h"`). По истечении — `on_timeout`:

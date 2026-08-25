@@ -156,7 +156,9 @@ def loop_status(job_id: str) -> str:
     if not job:
         return f"Error: Job '{job_id}' not found."
 
-    if job.status == "running":
+    if job.status in ("running", "in_progress"):
+        # waiting_input is excluded: HITL waits are idle by design and get no
+        # heartbeats, so a stale check there would fail live jobs.
         host_pid = (job.metrics or {}).get("host_pid")
         owner_dead = host_pid is not None and host_pid != os.getpid() and not is_pid_alive(host_pid)
         stale = time.time() - job.updated_at > 900
@@ -178,6 +180,10 @@ def loop_status(job_id: str) -> str:
         "progress": f"{done}/{total}",
         "results": job.results,
     }
+    if job.error:
+        payload["error"] = job.error
+    if job.metrics:
+        payload["metrics"] = job.metrics
     if job.status == "waiting_input":
         payload["questions"] = [_question_view(m) for m in rt.store.list_questions(job_id=job_id)]
         payload["message"] = (

@@ -192,7 +192,15 @@ class JobOpsMixin(StoreHost):
             job.updated_at = now
 
             failed = sum(1 for r in job.results.values() if not r["success"])
-            if failed > 0:
+            if failed > 0 and not (
+                auto_complete and job.total_steps > 0 and len(job.results) >= job.total_steps
+            ):
+                # A step failure does not own the lifecycle status: with skip/
+                # retry policies the loop keeps running and heartbeats must
+                # continue; finalize writes the terminal verdict.
+                job.error = error or job.error
+                job.status = "in_progress"
+            elif failed > 0:
                 job.status = "error"
                 job.error = error or job.error
             elif auto_complete and job.total_steps > 0 and len(job.results) >= job.total_steps:

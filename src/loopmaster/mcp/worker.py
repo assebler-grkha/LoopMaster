@@ -123,6 +123,7 @@ class DetachedRunner:
         checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR,
         poll_s: float = 1.0,
         heartbeat_s: float = 60.0,
+        max_concurrent: int = 32,
     ) -> None:
         self._store = store
         self._lock = threading.RLock()
@@ -130,6 +131,7 @@ class DetachedRunner:
         self._checkpoint_dir = checkpoint_dir
         self._poll_s = poll_s
         self._heartbeat_s = heartbeat_s
+        self.max_concurrent = max_concurrent
         self._engine_factory: EngineFactory = engine_factory or (
             lambda cancel_event: _default_engine_factory(cancel_event, checkpoint_dir)
         )
@@ -164,6 +166,12 @@ class DetachedRunner:
 
         cancel_event = threading.Event()
         with self._lock:
+            if len(self._events) >= self.max_concurrent:
+                raise ValueError(
+                    f"too many concurrent loops ({len(self._events)} >= "
+                    f"{self.max_concurrent}); waiting HITL jobs hold worker threads — "
+                    "resolve or cancel them first (loop_status / loop_cancel)"
+                )
             self._events[job_id] = cancel_event
 
         _emit_notification(
