@@ -27,11 +27,14 @@ def find_loop_files(search_dir: Path | None = None) -> list[Path]:
         if p.is_dir() and p not in dirs:
             dirs.append(p)
 
+    skip_dirs = {"templates", "__pycache__", ".git", "node_modules"}
     results = []
     seen = set()
     for d in dirs:
         for py_file in d.rglob("*.py"):
             if py_file.name.startswith("_") or py_file in seen:
+                continue
+            if any(part in skip_dirs for part in py_file.parts):
                 continue
             seen.add(py_file)
             try:

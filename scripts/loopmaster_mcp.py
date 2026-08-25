@@ -14,11 +14,33 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """Return True if a process with the given PID exists on this host."""
+    if not pid or pid <= 0:
+        return False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
+    except (AttributeError, OSError):
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
 
 from fastmcp import FastMCP
 
@@ -194,8 +216,29 @@ def loop_status(job_id: str) -> str:
     if not job:
         return f"Error: Job '{job_id}' not found."
 
+    if job.status == "running":
+        host_pid = (job.metrics or {}).get("host_pid")
+        owner_dead = host_pid is not None and host_pid != os.getpid() and not _pid_alive(host_pid)
+        stale = time.time() - job.updated_at > 900
+        if owner_dead:
+            _store.update_job(
+                job_id=job_id,
+                status="failed",
+                error=f"Server process (pid {host_pid}) exited before completion",
+                completed=True,
+            )
+            job = _store.get_job(job_id) or job
+        elif stale:
+            _store.update_job(
+                job_id=job_id,
+                status="failed",
+                error="Job stale: no progress update for more than 15 minutes",
+                completed=True,
+            )
+            job = _store.get_job(job_id) or job
+
     total = job.total_steps
-    done = len(job.results)
+    done = max(job.current_step, len(job.results))
     return json.dumps(
         {
             "job_id": job.job_id,
@@ -345,9 +388,19 @@ def loop_run(
         definition=load_loop_def(target_file) or {"name": loop_name},
         status="running",
     )
+    _store.update_job(job_id=job_id, metrics={"host_pid": os.getpid()})
 
     cancel_event = threading.Event()
     _cancel_events[job_id] = cancel_event
+
+    step_counter = {"n": 0}
+
+    def _on_step(_result: object) -> None:
+        step_counter["n"] += 1
+        try:
+            _store.update_job(job_id=job_id, current_step=step_counter["n"])
+        except Exception:  # noqa: BLE001 — progress updates must never kill the run
+            pass
 
     def _run_background():
         start_time = time.time()
@@ -360,6 +413,7 @@ def loop_run(
             llm_client=LLMClient(config=config),
             cancel_event=cancel_event,
         )
+        engine.on_step_complete(_on_step)
         try:
             run_result = engine.run(target_loop_def, initial_context=ctx_data)
         except Exception as exc:
