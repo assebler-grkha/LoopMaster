@@ -68,7 +68,9 @@ from loopmaster.mcp.discovery import (
 )
 from loopmaster.mcp.job_store import get_job_store
 from loopmaster.mcp.models_tools import handle_model_list, handle_model_recommend
+from loopmaster.mcp.worker import DetachedRunner
 from loopmaster.metrics.collector import MetricsCollector
+from loopmaster.spec import SpecValidationError, load_loop_from_dict
 
 # Backwards-compatible aliases for private helpers
 _find_loop_files = find_loop_files
@@ -90,6 +92,7 @@ mcp = FastMCP(
 
 _store = get_job_store()
 _store.mark_interrupted_jobs_on_startup()
+_runner = DetachedRunner(_store)
 
 # Global map of active cancel events keyed by job_id
 _cancel_events: dict[str, threading.Event] = {}
@@ -262,11 +265,111 @@ def loop_cancel(job_id: str) -> str:
     cancel_event = _cancel_events.get(job_id)
     if cancel_event:
         cancel_event.set()
+    _runner.request_cancel(job_id)
     _store.cancel_job(job_id)
     return f"Loop '{job.loop_name}' cancelled."
 
 
+@mcp.tool()
+def loop_save(loop_name: str, spec_json: str) -> str:
+    """Validate and persist a JSON LoopSpec into the database for later runs.
+
+    Args:
+        loop_name: Storage name (must match spec "name" field).
+        spec_json: Full LoopSpec v1 JSON document as a string.
+    """
+    try:
+        data = json.loads(spec_json)
+    except json.JSONDecodeError as exc:
+        return json.dumps({"error": f"invalid JSON: {exc}"})
+
+    if isinstance(data, dict) and data.get("name") != loop_name:
+        return json.dumps(
+            {
+                "error": (
+                    f"name mismatch: loop_name='{loop_name}' but spec name='{data.get('name')}'"
+                )
+            }
+        )
+
+    try:
+        loop_def, _spec = load_loop_from_dict(data)
+    except SpecValidationError as exc:
+        return json.dumps({"error": str(exc)})
+
+    saved = _store.save_loop(
+        name=loop_name,
+        version=loop_def.version,
+        spec=data,
+        source_hash=loop_def.source_hash,
+    )
+    return json.dumps(
+        {
+            "saved": True,
+            "name": saved.name,
+            "version": saved.version,
+            "source_hash": saved.source_hash[:16],
+            "steps": _spec.step_names(),
+            "message": "Use loop_run with this loop_name or the raw spec_json.",
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def loop_delete(loop_name: str) -> str:
+    """Delete a persisted JSON loop spec from the database."""
+    if _store.delete_loop(loop_name):
+        return json.dumps({"deleted": True, "name": loop_name})
+    return json.dumps({"deleted": False, "error": f"Loop '{loop_name}' not found in store."})
+
+
 # ── LLM Execution via Unified LoopEngine ────────────────────────────────────
+
+
+def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
+    """Run a LoopSpec v1 JSON document through the detached worker."""
+    if mode != "detached":
+        return json.dumps(
+            {
+                "error": f"mode '{mode}' is not supported for spec_json; use mode='detached'.",
+            }
+        )
+
+    try:
+        data = json.loads(spec_json)
+    except json.JSONDecodeError as exc:
+        return json.dumps({"error": f"invalid JSON: {exc}"})
+
+    try:
+        loop_def, spec = load_loop_from_dict(data)
+    except SpecValidationError as exc:
+        return json.dumps({"error": str(exc)})
+
+    try:
+        ctx_data = json.loads(context) if isinstance(context, str) else dict(context)
+    except Exception as exc:
+        return json.dumps({"error": f"Invalid context JSON: {exc}"})
+
+    job_id = _runner.submit(
+        loop_def,
+        initial_context=ctx_data or dict(spec.initial_context),
+        definition={"spec": data, "step_count": len(spec.step_names())},
+    )
+    return json.dumps(
+        {
+            "job_id": job_id,
+            "status": "running",
+            "loop_name": spec.name,
+            "execution_mode": mode,
+            "steps": spec.step_names(),
+            "message": (
+                "Detached loop started in worker thread. "
+                "Use loop_status/loop_result to poll; loop_cancel to stop."
+            ),
+        },
+        indent=2,
+    )
 
 
 def _find_target_loop_def(
@@ -360,12 +463,26 @@ def _handle_run_completion(
 
 @mcp.tool()
 def loop_run(
-    loop_name: str,
+    loop_name: str = "",
     context: str = "{}",
     model: str | None = None,
     search_dir: str | None = None,
+    spec_json: str | None = None,
+    mode: str = "detached",
 ) -> str:
-    """Execute a loop end-to-end. Returns immediately with job_id; poll loop_status for progress."""
+    """Execute a loop end-to-end. Returns immediately with job_id; poll loop_status for progress.
+
+    Two sources are supported:
+    - spec_json: raw LoopSpec v1 JSON string; runs detached in a worker thread
+      inside this MCP process (no orphan processes; dies with opencode).
+    - loop_name: a Python DSL loop discovered in the workspace (legacy path).
+    """
+    if spec_json is not None:
+        return _run_spec_json(spec_json, context, mode)
+
+    if not loop_name:
+        return json.dumps({"error": "Provide either spec_json or loop_name."})
+
     config = get_llm_config(model_override=model)
     if not config:
         return json.dumps(

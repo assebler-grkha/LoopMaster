@@ -194,7 +194,7 @@ def execute_traced_loop(
         },
     ) as loop_span:
         try:
-            if resume_checkpoint is None:
+            if resume_checkpoint is None and getattr(loop_def, "_recollect_steps", True):
                 loop_def._collected_steps = None
             total_cost, total_tokens = engine._run_steps_loop(
                 loop_def, ctx, executed_steps, results, effective_job_id

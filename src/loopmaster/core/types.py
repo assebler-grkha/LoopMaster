@@ -314,6 +314,7 @@ class LoopDef:
     interruption_protection: InterruptionProtection | None = None
     source_hash: str = ""
     _collected_steps: list[Step] | None = field(default=None, repr=False)
+    _recollect_steps: bool = field(default=True, repr=False)
 
     def __post_init__(self) -> None:
         if not self.source_hash:

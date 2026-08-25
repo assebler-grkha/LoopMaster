@@ -127,20 +127,9 @@ def parse_loop_spec(data: Any, *, source_path: str | None = None) -> tuple[LoopS
     return spec, steps
 
 
-def load_loop_from_json_file(path: str | Path) -> tuple[LoopDef, LoopSpec]:
-    """Load a JSON spec file into an executable LoopDef plus its IR."""
-    file_path = Path(path)
-    try:
-        raw = file_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise SpecValidationError([f"cannot read file: {exc}"], str(file_path)) from exc
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SpecValidationError([f"invalid JSON: {exc}"], str(file_path)) from exc
-
-    spec, steps = parse_loop_spec(data, source_path=str(file_path))
+def load_loop_from_dict(data: Any, *, source_path: str | None = None) -> tuple[LoopDef, LoopSpec]:
+    """Load a parsed JSON spec dict into an executable LoopDef plus its IR."""
+    spec, steps = parse_loop_spec(data, source_path=source_path)
 
     canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
     source_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -155,7 +144,24 @@ def load_loop_from_json_file(path: str | Path) -> tuple[LoopDef, LoopSpec]:
         source_hash=source_hash,
     )
     loop_def._collected_steps = steps  # noqa: SLF001 - engine consumes prebuilt steps
+    loop_def._recollect_steps = False  # noqa: SLF001 - declarative steps are immutable
     return loop_def, spec
+
+
+def load_loop_from_json_file(path: str | Path) -> tuple[LoopDef, LoopSpec]:
+    """Load a JSON spec file into an executable LoopDef plus its IR."""
+    file_path = Path(path)
+    try:
+        raw = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SpecValidationError([f"cannot read file: {exc}"], str(file_path)) from exc
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SpecValidationError([f"invalid JSON: {exc}"], str(file_path)) from exc
+
+    return load_loop_from_dict(data, source_path=str(file_path))
 
 
 def _noop_body(ctx: dict[str, Any]) -> dict[str, Any]:
