@@ -17,7 +17,11 @@ SHELL_OK = {
     "name": "worker-ok",
     "version": "1.0.0",
     "steps": [
-        {"type": "shell", "name": "greet", "command": ["python", "-c", "print('detached-worker-ok')"]},
+        {
+            "type": "shell",
+            "name": "greet",
+            "command": ["python", "-c", "print('detached-worker-ok')"],
+        },
     ],
 }
 
@@ -125,7 +129,9 @@ class TestRecollectFlag:
             calls.append(1)
 
         ld = LoopDef(name="py-recollect", version="1.0.0", body=body)
-        ld._collected_steps = [Step(name="x", executor=ShellExecutor(command=["python", "-c", "print('hi')"]))]
+        ld._collected_steps = [
+            Step(name="x", executor=ShellExecutor(command=["python", "-c", "print('hi')"]))
+        ]
         engine = LoopEngine()
         engine.run(ld, initial_context={})
         assert ld._recollect_steps is True

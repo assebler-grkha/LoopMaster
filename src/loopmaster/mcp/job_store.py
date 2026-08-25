@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -15,9 +17,22 @@ from typing import Any
 
 logger = logging.getLogger("loopmaster.mcp.job_store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 ACTIVE_STATUSES = frozenset({"ready", "running", "in_progress"})
+BLOCK_LANGUAGES = frozenset({"python", "shell"})
+_CAPABILITY_RE = re.compile(r"^net$|^fs:(read|write):.+$")
+_CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
+_CODE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _split_block_ref(ref: str) -> tuple[str, str | None]:
+    """Split a 'name@X.Y.Z' ref into (name, version); plain name -> version None."""
+    if isinstance(ref, str) and _CODE_REF_RE.match(ref):
+        name, _, version = ref.partition("@")
+        return name, version
+    return ref, None
 
 
 def is_pid_alive(pid: int | None) -> bool:
@@ -100,6 +115,37 @@ class LoopData:
         }
 
 
+@dataclass
+class CodeBlockData:
+    """Represents an immutable code block (name, version) with pinned sha256."""
+
+    name: str
+    version: str
+    language: str
+    source: str
+    sha256: str = ""
+    entrypoint: str = "main"
+    capabilities: list[str] = field(default_factory=list)
+    description: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self, include_source: bool = True) -> dict[str, Any]:
+        """Convert to JSON-serializable dictionary (source optional)."""
+        data: dict[str, Any] = {
+            "name": self.name,
+            "version": self.version,
+            "language": self.language,
+            "entrypoint": self.entrypoint,
+            "sha256": self.sha256,
+            "capabilities": list(self.capabilities),
+            "description": self.description,
+            "created_at": self.created_at,
+        }
+        if include_source:
+            data["source"] = self.source
+        return data
+
+
 class JobStore:
     """Persistent SQLite job store with thread-safety and WAL concurrency."""
 
@@ -161,6 +207,20 @@ class JobStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS code_blocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    entrypoint TEXT NOT NULL DEFAULT 'main',
+                    source TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL DEFAULT '[]',
+                    description TEXT,
+                    created_at REAL NOT NULL,
+                    UNIQUE(name, version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_code_blocks_name ON code_blocks(name);
                 """
             )
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -229,6 +289,140 @@ class JobStore:
             self.conn.commit()
             cur.close()
         return deleted
+
+    def save_code_block(
+        self,
+        name: str,
+        version: str,
+        language: str,
+        source: str,
+        capabilities: list[str] | None = None,
+        description: str = "",
+        entrypoint: str = "main",
+    ) -> CodeBlockData:
+        """Register an immutable code block. Re-registering the same
+        (name, version) raises ValueError — publish a new version instead."""
+        if not isinstance(name, str) or not _CODE_NAME_RE.match(name):
+            raise ValueError(f"invalid code block name {name!r} (expected kebab-case)")
+        if not isinstance(version, str) or not _SEMVER_RE.match(version):
+            raise ValueError(f"invalid version {version!r} (expected semantic X.Y.Z)")
+        if language not in BLOCK_LANGUAGES:
+            raise ValueError(
+                f"unsupported language {language!r} (expected one of {sorted(BLOCK_LANGUAGES)})"
+            )
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("source must be a non-empty string")
+        caps = [str(c) for c in (capabilities or [])]
+        for cap in caps:
+            if not _CAPABILITY_RE.match(cap):
+                raise ValueError(
+                    f"invalid capability {cap!r} "
+                    "(expected 'net', 'fs:read:<prefix>' or 'fs:write:<prefix>')"
+                )
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        with self._lock:
+            cur = self.conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO code_blocks (
+                        name, version, language, entrypoint, source, sha256,
+                        capabilities_json, description, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        name,
+                        version,
+                        language,
+                        entrypoint or "main",
+                        source,
+                        digest,
+                        json.dumps(caps),
+                        description,
+                        time.time(),
+                    ),
+                )
+                self.conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"code block '{name}@{version}' already exists — register a new version instead"
+                ) from exc
+            finally:
+                cur.close()
+        return CodeBlockData(
+            name=name,
+            version=version,
+            language=language,
+            source=source,
+            sha256=digest,
+            entrypoint=entrypoint or "main",
+            capabilities=caps,
+            description=description,
+        )
+
+    def get_code_block(self, ref: str, version: str | None = None) -> CodeBlockData | None:
+        """Fetch a code block by 'name@X.Y.Z' ref, or by name + version."""
+        name, ref_version = _split_block_ref(ref)
+        resolved_version = version or ref_version
+        with self._lock:
+            cur = self.conn.cursor()
+            if resolved_version is None:
+                cur.execute(
+                    "SELECT * FROM code_blocks WHERE name = ? ORDER BY id DESC LIMIT 1",
+                    (name,),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM code_blocks WHERE name = ? AND version = ?",
+                    (name, resolved_version),
+                )
+            row = cur.fetchone()
+            cur.close()
+        return _row_to_code_block(row) if row else None
+
+    def list_code_blocks(
+        self, pattern: str | None = None, limit: int = 100, include_source: bool = False
+    ) -> list[CodeBlockData]:
+        """List code blocks (newest first), optionally filtered by name substring."""
+        with self._lock:
+            cur = self.conn.cursor()
+            if pattern:
+                cur.execute(
+                    "SELECT * FROM code_blocks WHERE name LIKE ? ORDER BY created_at DESC LIMIT ?",
+                    (f"%{pattern}%", int(limit)),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM code_blocks ORDER BY created_at DESC LIMIT ?",
+                    (int(limit),),
+                )
+            rows = cur.fetchall()
+            cur.close()
+        blocks = []
+        for r in rows:
+            block = _row_to_code_block(r)
+            if not include_source:
+                block.source = ""
+            blocks.append(block)
+        return blocks
+
+    def delete_code_block(self, name: str, version: str) -> bool:
+        """Delete a specific code block version. Returns True when removed."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM code_blocks WHERE name = ? AND version = ?", (name, version))
+            deleted = cur.rowcount > 0
+            self.conn.commit()
+            cur.close()
+        return deleted
+
+    def verify_code_block(self, ref: str, version: str | None = None) -> bool:
+        """Recompute the sha256 of the stored source and compare with the pin."""
+        block = self.get_code_block(ref, version)
+        if block is None:
+            return False
+        return hashlib.sha256(block.source.encode("utf-8")).hexdigest() == block.sha256
 
     def create_job(
         self,
@@ -575,6 +769,25 @@ def _row_to_loop(row: sqlite3.Row) -> LoopData:
         source_hash=row["source_hash"] or "",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _row_to_code_block(row: sqlite3.Row) -> CodeBlockData:
+    """Parse SQLite Row into CodeBlockData dataclass."""
+    try:
+        caps = json.loads(row["capabilities_json"]) if row["capabilities_json"] else []
+    except (json.JSONDecodeError, TypeError):
+        caps = []
+    return CodeBlockData(
+        name=row["name"],
+        version=row["version"],
+        language=row["language"],
+        source=row["source"] or "",
+        sha256=row["sha256"] or "",
+        entrypoint=row["entrypoint"] or "main",
+        capabilities=[str(c) for c in caps],
+        description=row["description"] or "",
+        created_at=row["created_at"],
     )
 
 

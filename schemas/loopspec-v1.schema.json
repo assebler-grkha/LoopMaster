@@ -32,6 +32,14 @@
       "type": "object",
       "description": "Initial context values available to all steps."
     },
+    "deny_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^net$|^fs:(read|write):.+$"
+      },
+      "description": "Code-block capabilities forbidden anywhere in this loop."
+    },
     "budget": {
       "type": "object",
       "properties": {
@@ -153,6 +161,26 @@
           }
         },
         {
+          "if": { "properties": { "type": { "const": "code" } } },
+          "then": {
+            "required": ["ref"],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*@\\d+\\.\\d+\\.\\d+$",
+                "description": "Code block reference 'name@X.Y.Z' from the code_blocks store."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Optional pin; execution fails fast on mismatch."
+              },
+              "input": { "type": "object" },
+              "timeout": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          }
+        },
+        {
           "if": { "properties": { "type": { "const": "parallel" } } },
           "then": {
             "required": ["steps"],
@@ -166,7 +194,7 @@
                   "properties": {
                     "type": {
                       "type": "string",
-                      "enum": ["llm", "shell", "http", "mcp"]
+                      "enum": ["llm", "shell", "http", "mcp", "code"]
                     },
                     "name": { "type": "string", "minLength": 1 }
                   }

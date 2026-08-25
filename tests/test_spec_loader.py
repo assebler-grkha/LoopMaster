@@ -121,13 +121,13 @@ class TestValidateLoopSpec:
         errors = validate_loop_spec(data)
         assert any("unknown step type" in e for e in errors)
 
-    def test_reserved_code_type_rejected_with_phase(self):
+    def test_code_type_requires_ref(self):
         data = {
             **MINIMAL_SPEC,
             "steps": [{"type": "code", "name": "blk"}],
         }
         errors = validate_loop_spec(data)
-        assert any("Phase 3" in e for e in errors)
+        assert any("'ref'" in e for e in errors)
 
     def test_reserved_human_type_rejected_with_phase(self):
         data = {

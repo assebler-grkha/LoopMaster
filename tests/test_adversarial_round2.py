@@ -111,7 +111,9 @@ class TestExecutorFieldValidation:
         assert any("unknown placeholder" in e for e in validate_loop_spec(data))
 
     def test_known_context_ref_in_command_ok(self):
-        data = _spec([{"type": "shell", "name": "sh", "command": "echo {topic}"}], ctx={"topic": "x"})
+        data = _spec(
+            [{"type": "shell", "name": "sh", "command": "echo {topic}"}], ctx={"topic": "x"}
+        )
         assert validate_loop_spec(data) == []
 
 
@@ -178,9 +180,7 @@ class TestResubmitAfterTerminal:
     def test_resubmit_same_job_id(self, tmp_path):
         store = _store(tmp_path)
         runner = _runner(store)
-        data = _spec(
-            [{"type": "shell", "name": "one", "command": ["python", "-c", "print('ok')"]}]
-        )
+        data = _spec([{"type": "shell", "name": "one", "command": ["python", "-c", "print('ok')"]}])
         loop_def, _spec_obj = load_loop_from_dict(data)
         first_id = runner.submit(loop_def, job_id="retry-me")
         _wait_terminal(store, first_id)
@@ -215,7 +215,11 @@ class TestCreateJobUpsert:
     def test_metrics_persisted_at_create(self, tmp_path):
         store = _store(tmp_path)
         store.create_job(
-            "j1", "loop", {}, status="running", total_steps=1,
+            "j1",
+            "loop",
+            {},
+            status="running",
+            total_steps=1,
             metrics={"host_pid": os.getpid()},
         )
         job1 = store.get_job("j1")

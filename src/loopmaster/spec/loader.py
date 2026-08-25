@@ -13,6 +13,7 @@ from typing import Any
 
 from loopmaster.core.policies import Budget, ErrorPolicy, RecoveryAction
 from loopmaster.core.types import Conditional, LoopDef, Parallel, Step
+from loopmaster.executors.code_block import CodeBlockExecutor
 from loopmaster.executors.http import HTTPExecutor
 from loopmaster.executors.mcp import MCPToolExecutor
 from loopmaster.executors.shell import ShellExecutor
@@ -23,11 +24,12 @@ SPEC_VERSION = "1.0"
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-_LEAF_TYPES = {"llm", "shell", "http", "mcp"}
+_LEAF_TYPES = {"llm", "shell", "http", "mcp", "code"}
 _RESERVED_PHASES = {
-    "code": "Phase 3 (CodeBlockStore)",
     "human": "Phase 4 (HITL protocol)",
 }
+_CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _PLACEHOLDER_RE = re.compile(r"\{\{?([a-zA-Z_][\w\.]*)\}?\}")
 _BRACE_CANDIDATE_RE = re.compile(r"\{[^{}]{0,80}\}")
@@ -121,7 +123,11 @@ def parse_loop_spec(data: Any, *, source_path: str | None = None) -> tuple[LoopS
     if errors:
         raise SpecValidationError(errors, source_path)
 
-    steps = _build_steps(data["steps"], source_path=source_path)
+    steps = _build_steps(
+        data["steps"],
+        source_path=source_path,
+        deny_capabilities=data.get("deny_capabilities") or [],
+    )
     seen: set[str] = set()
 
     def _check_names(nodes: list[Any]) -> None:
@@ -281,9 +287,14 @@ def _validate(node: Any, at: str) -> list[str]:
         "budget",
         "error_policy",
         "steps",
+        "deny_capabilities",
     }
     if unknown:
         _err(errors, at, f"unknown top-level keys: {sorted(unknown)}")
+
+    deny = node.get("deny_capabilities")
+    if deny is not None and not (isinstance(deny, list) and all(isinstance(c, str) for c in deny)):
+        _err(errors, at, "'deny_capabilities' must be an array of strings")
 
     steps = node.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -370,6 +381,22 @@ def _validate_node(node: Any, at: str, errors: list[str], leaf_only: bool = Fals
         args = node.get("arguments")
         if args is not None and not isinstance(args, dict):
             _err(errors, at, "mcp 'arguments' must be an object")
+        _check_positive_number(node, "timeout", at, errors)
+
+    elif ntype == "code":
+        ref = node.get("ref")
+        if not isinstance(ref, str) or not _CODE_REF_RE.match(ref):
+            _err(
+                errors,
+                at,
+                "code step requires 'ref' as 'name@X.Y.Z' (kebab-case name + semantic version)",
+            )
+        sha = node.get("sha256")
+        if sha is not None and (not isinstance(sha, str) or not _SHA256_RE.match(sha)):
+            _err(errors, at, "code 'sha256' must be a 64-char lowercase hex string")
+        block_input = node.get("input")
+        if block_input is not None and not isinstance(block_input, dict):
+            _err(errors, at, "code 'input' must be an object")
         _check_positive_number(node, "timeout", at, errors)
 
     elif ntype == "parallel":
@@ -527,6 +554,10 @@ def _walk_semantics(
             for text in _collect_strings(node.get("arguments")):
                 _check_template_refs(text, known, at, errors)
 
+        elif ntype == "code":
+            for text in _collect_strings(node.get("input")):
+                _check_template_refs(text, known, at, errors)
+
         elif ntype == "parallel":
             # Children run concurrently: siblings must not reference each
             # other's outputs; only the enclosing scope is visible. Merge all
@@ -574,14 +605,26 @@ def _walk_semantics(
     return registered
 
 
-def _build_steps(spec_steps: list[Any], *, source_path: str | None = None) -> list[Any]:
-    return [_build_node(s, source_path=source_path) for s in spec_steps]
+def _build_steps(
+    spec_steps: list[Any],
+    *,
+    source_path: str | None = None,
+    deny_capabilities: list[str] | None = None,
+) -> list[Any]:
+    return [
+        _build_node(s, source_path=source_path, deny_capabilities=deny_capabilities or [])
+        for s in spec_steps
+    ]
 
 
-def _build_node(node: dict[str, Any], **_kwargs: Any) -> Any:
+def _build_node(
+    node: dict[str, Any],
+    **_kwargs: Any,
+) -> Any:
     """Build a runtime object (Step / Parallel / Conditional) from a validated node."""
     ntype = node["type"]
     name = node["name"]
+    deny_caps = _kwargs.get("deny_capabilities") or []
 
     if ntype == "llm":
         kwargs: dict[str, Any] = {}
@@ -634,14 +677,31 @@ def _build_node(node: dict[str, Any], **_kwargs: Any) -> Any:
             timeout=node.get("timeout"),
         )
 
+    if ntype == "code":
+        return Step(
+            name=name,
+            executor=CodeBlockExecutor(
+                ref=node["ref"],
+                sha256=node.get("sha256"),
+                input=node.get("input"),
+                timeout=float(node.get("timeout", 60.0)),
+                deny_capabilities=deny_caps,
+            ),
+            timeout=node.get("timeout"),
+        )
+
     if ntype == "parallel":
-        children = [Step(**_leaf_fields(c)) for c in node["steps"]]
+        children = [
+            Step(**_leaf_fields(c, deny_capabilities=_kwargs.get("deny_capabilities") or []))
+            for c in node["steps"]
+        ]
         return Parallel(*children)
 
     if ntype == "conditional":
-        then_steps = [_build_node(c) for c in node["then"]]
+        child_kwargs = {"source_path": _kwargs.get("source_path"), "deny_capabilities": deny_caps}
+        then_steps = [_build_node(c, **child_kwargs) for c in node["then"]]
         else_raw = node.get("else")
-        else_steps = [_build_node(c) for c in (else_raw or [])]
+        else_steps = [_build_node(c, **child_kwargs) for c in (else_raw or [])]
         return Conditional(
             condition=node["condition"],
             then_steps=then_steps,
@@ -652,7 +712,9 @@ def _build_node(node: dict[str, Any], **_kwargs: Any) -> Any:
     raise SpecValidationError([f"unbuildable type '{ntype}'"])
 
 
-def _leaf_fields(node: dict[str, Any]) -> dict[str, Any]:
+def _leaf_fields(
+    node: dict[str, Any], *, deny_capabilities: list[str] | None = None
+) -> dict[str, Any]:
     """Extract Step constructor fields for parallel leaf nodes."""
     ntype = node["type"]
     base: dict[str, Any] = {"name": node["name"]}
@@ -680,6 +742,14 @@ def _leaf_fields(node: dict[str, Any]) -> dict[str, Any]:
             tool_name=node["tool_name"],
             arguments=node.get("arguments"),
             timeout=float(node.get("timeout", 60.0)),
+        )
+    elif ntype == "code":
+        base["executor"] = CodeBlockExecutor(
+            ref=node["ref"],
+            sha256=node.get("sha256"),
+            input=node.get("input"),
+            timeout=float(node.get("timeout", 60.0)),
+            deny_capabilities=deny_capabilities or [],
         )
     else:
         raise SpecValidationError([f"type '{ntype}' cannot nest inside parallel"])

@@ -54,6 +54,8 @@ def _normalize_output(value: Any) -> Any:
     """Convert executor result objects into JSON-friendly values."""
     if hasattr(value, "content"):
         return value.content
+    if type(value).__name__ == "CodeBlockResult":
+        return value.to_dict()
     if hasattr(value, "stdout"):
         return {
             "stdout": getattr(value, "stdout", None),
