@@ -6,6 +6,7 @@
 - **loop_run**: выполнение циклов через LLM API с env-based провайдерами
 - Multi-provider LLM client: OpenAI, Anthropic, Google, OpenRouter, Custom
 - Тестовые циклы: simple_test, error_handling_test
+- **Ветка `refactor/json-loop-engine` (рефакторинг "JSON Loop Engine", ADR-011)**: LoopSpec v1 (JSON-конфигурации циклов: llm/shell/http/mcp/code/human + parallel/conditional), LoopStore + detached-воркер в процессе MCP, CodeBlockStore (sha256-pinning, subprocess-only), HITL-протокол (loop_respond/loop_questions, waiting_input), Notifications outbox (loop_inbox, pending_notifications маркер), компилятор Python→JSON (`export --format json`). MCP-инструменты расширены до 15+.
 
 ## Цель
 

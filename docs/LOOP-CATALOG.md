@@ -236,6 +236,17 @@ loop_run("security_audit", context={"path": "/path/to/project"})
 
 Proactive triggering rules are defined in `docs/AGENT_GUIDE.md` section 2.
 
+### JSON (LoopSpec v1) versions
+
+Loops can also be stored as declarative JSON specs (`LoopSpec v1`, ADR-011) and run detached via `loop_run(spec_json=..., mode="detached")`. Any Python loop can be compiled: `loop-engine export loop.py --format json -o loop.json`.
+
+Compiled examples shipped in `loops/`:
+
+| File | Compiled from | Notes |
+|------|---------------|-------|
+| `scenario1_simple_pipeline.json` | `scenario1_simple_pipeline.py` | 3 LLM steps, validates clean |
+| `scenario7_shell_pipeline.json` | `scenario7_shell_pipeline.py` | Shell-only — runs without any LLM keys |
+
 ---
 
 ## Templates

@@ -1,0 +1,34 @@
+{
+  "loopmaster": "1.0",
+  "name": "test_shell_pipeline",
+  "version": "1.0.0",
+  "execution": "engine",
+  "steps": [
+    {
+      "type": "shell",
+      "name": "get_system_info",
+      "command": [
+        "python",
+        "-c",
+        "import sys,platform;print('Python=' + sys.version.split()[0] + ' OS=' + platform.system() + ' Arch=' + platform.machine())"
+      ],
+      "timeout": 60.0
+    },
+    {
+      "type": "shell",
+      "name": "list_files",
+      "command": [
+        "python",
+        "-c",
+        "import os;print('\\n'.join(sorted(os.listdir('.'))[:10]))"
+      ],
+      "timeout": 60.0
+    },
+    {
+      "type": "llm",
+      "name": "analyze",
+      "prompt": "Given this system info: {get_system_info.stdout}\nAnd these files in the current dir: {list_files.stdout}\nWrite a 2-sentence summary.",
+      "model": "stealth/ox-alpha"
+    }
+  ]
+}

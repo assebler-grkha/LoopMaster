@@ -195,14 +195,8 @@ Produce an Architecture Decision Record (ADR):
 # ── Loop definition ─────────────────────────────────────────────
 
 
-@Loop(
-    name="arch_debate",
-    version="1.0.0",
-    budget=Budget(max_steps=20),
-)
-def arch_debate(ctx):
-    # ── Phase 1: Context Gathering ──
-
+def _context_steps() -> None:
+    """Phase 1a: timestamp, codebase search, clarifying-question fallback."""
     Step(
         "get_timestamp",
         executor=ShellExecutor(command=[PYTHON, "-c", "import time; print(int(time.time()))"]),
@@ -253,6 +247,9 @@ def arch_debate(ctx):
         ],
     )
 
+
+def _source_steps() -> None:
+    """Phase 1b: extract symbol, read sources, check previous ADRs."""
     Step(
         "extract_first_name",
         model=MODEL,
@@ -292,19 +289,12 @@ def arch_debate(ctx):
         ),
     )
 
-    # ── Phase 2: Architect A — Proposal ──
 
-    Step(
-        "architect_a_prepare",
-        model=MODEL,
-        prompt=PROMPT_A_PREPARE,
-    )
+def _architect_a_steps() -> None:
+    """Phase 2: Architect A prepares, asks questions, proposes."""
+    Step("architect_a_prepare", model=MODEL, prompt=PROMPT_A_PREPARE)
 
-    Step(
-        "has_question",
-        model=MODEL,
-        prompt=PROMPT_HAS_QUESTION,
-    )
+    Step("has_question", model=MODEL, prompt=PROMPT_HAS_QUESTION)
 
     Conditional(
         condition="has_question == 'yes'",
@@ -327,61 +317,31 @@ def arch_debate(ctx):
         else_steps=[],
     )
 
-    Step(
-        "architect_a_propose",
-        model=MODEL,
-        prompt=PROMPT_A_PROPOSE,
-    )
+    Step("architect_a_propose", model=MODEL, prompt=PROMPT_A_PROPOSE)
 
-    # ── Phase 3: Architect B — Critique ──
 
-    Step(
-        "architect_b_critique",
-        model=MODEL,
-        prompt=PROMPT_B_CRITIQUE,
-    )
+def _critique_steps() -> None:
+    """Phase 3: Architect B critiques; revision round if rejected."""
+    Step("architect_b_critique", model=MODEL, prompt=PROMPT_B_CRITIQUE)
 
-    Step(
-        "has_reject",
-        model=MODEL,
-        prompt=PROMPT_HAS_REJECT,
-    )
+    Step("has_reject", model=MODEL, prompt=PROMPT_HAS_REJECT)
 
     Conditional(
         condition="has_reject == 'yes'",
         then_steps=[
-            Step(
-                "architect_a_revise",
-                model=MODEL,
-                prompt=PROMPT_A_REVISE,
-            ),
-            Step(
-                "architect_b_recheck",
-                model=MODEL,
-                prompt=PROMPT_B_RECHECK,
-            ),
-            Step(
-                "revision_context",
-                model=MODEL,
-                prompt=PROMPT_SET_REVISION_YES,
-            ),
+            Step("architect_a_revise", model=MODEL, prompt=PROMPT_A_REVISE),
+            Step("architect_b_recheck", model=MODEL, prompt=PROMPT_B_RECHECK),
+            Step("revision_context", model=MODEL, prompt=PROMPT_SET_REVISION_YES),
         ],
         else_steps=[
-            Step(
-                "revision_context",
-                model=MODEL,
-                prompt=PROMPT_SET_REVISION_NO,
-            ),
+            Step("revision_context", model=MODEL, prompt=PROMPT_SET_REVISION_NO),
         ],
     )
 
-    # ── Phase 4: Judge + Storage ──
 
-    Step(
-        "judge_verdict",
-        model=MODEL,
-        prompt=PROMPT_JUDGE,
-    )
+def _judge_steps() -> None:
+    """Phase 4: Judge verdict, ADR storage, summary."""
+    Step("judge_verdict", model=MODEL, prompt=PROMPT_JUDGE)
 
     Step(
         "store_adr",
@@ -411,4 +371,16 @@ def arch_debate(ctx):
         ),
     )
 
+
+@Loop(
+    name="arch_debate",
+    version="1.0.0",
+    budget=Budget(max_steps=20),
+)
+def arch_debate(ctx):
+    _context_steps()
+    _source_steps()
+    _architect_a_steps()
+    _critique_steps()
+    _judge_steps()
     return ctx

@@ -94,14 +94,8 @@ Return EXACTLY: VERDICT: <IMPROVED|UNCHANGED|DEGRADED>"""
 # ── Loop definition ─────────────────────────────────────────────
 
 
-@Loop(
-    name="refactor_loop",
-    version="1.0.0",
-    budget=Budget(max_steps=25),
-)
-def refactor_loop(ctx):
-    # ── Phase 1: Scan ──
-
+def _scan_steps() -> None:
+    """Phases 1-2: baseline scan and auto-fix."""
     Step(
         "get_timestamp",
         executor=ShellExecutor(command=[PYTHON, "-c", "import time; print(int(time.time()))"]),
@@ -111,8 +105,6 @@ def refactor_loop(ctx):
         "aislop_scan_baseline",
         executor=ShellExecutor(command=_cmd("aislop_scan", "--path", "{path}")),
     )
-
-    # ── Phase 2: Auto-fix ──
 
     Step(
         "aislop_fix",
@@ -124,15 +116,14 @@ def refactor_loop(ctx):
         executor=ShellExecutor(command=_cmd("aislop_scan", "--path", "{path}")),
     )
 
-    # ── Phase 3: Prioritize ──
 
+def _prioritize_steps() -> None:
+    """Phases 3-4: pick the most impactful finding, read its source."""
     Step(
         "prioritize",
         model=MODEL,
         prompt=PROMPT_PRIORITIZE,
     )
-
-    # ── Phase 4: Read target ──
 
     Step(
         "get_target_name",
@@ -154,15 +145,14 @@ def refactor_loop(ctx):
         ),
     )
 
-    # ── Phase 5: Refactor ──
 
+def _refactor_steps() -> None:
+    """Phases 5-6: produce refactored code, apply with backup."""
     Step(
         "refactor_code",
         model=MODEL,
         prompt=PROMPT_REFACTOR,
     )
-
-    # ── Phase 6: Apply ──
 
     Step(
         "write_refactored",
@@ -179,8 +169,9 @@ def refactor_loop(ctx):
         ),
     )
 
-    # ── Phase 7: Verify ──
 
+def _verify_steps() -> None:
+    """Phases 7-8: run tests, compare scores, keep or revert."""
     Step(
         "run_tests",
         executor=ShellExecutor(command=_cmd("run_tests", "--test_path", "{path}")),
@@ -196,8 +187,6 @@ def refactor_loop(ctx):
         model=MODEL,
         prompt=PROMPT_COMPARE,
     )
-
-    # ── Phase 8: Decide ──
 
     Step(
         "has_improved",
@@ -252,6 +241,9 @@ def refactor_loop(ctx):
         ],
     )
 
+
+def _finish_steps() -> None:
+    """Final summary."""
     Step(
         "summary",
         model=MODEL,
@@ -266,4 +258,16 @@ def refactor_loop(ctx):
         ),
     )
 
+
+@Loop(
+    name="refactor_loop",
+    version="1.0.0",
+    budget=Budget(max_steps=25),
+)
+def refactor_loop(ctx):
+    _scan_steps()
+    _prioritize_steps()
+    _refactor_steps()
+    _verify_steps()
+    _finish_steps()
     return ctx

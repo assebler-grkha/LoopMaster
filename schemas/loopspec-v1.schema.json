@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopmaster.dev/schemas/loopspec-v1.schema.json",
+  "title": "LoopSpec v1",
+  "description": "JSON configuration format for LoopMaster autonomous loops.",
+  "type": "object",
+  "required": ["loopmaster", "name", "version", "steps"],
+  "properties": {
+    "loopmaster": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Spec format version marker."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Slug identifier of the loop."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of this loop definition."
+    },
+    "description": { "type": "string" },
+    "execution": {
+      "type": "string",
+      "enum": ["engine", "agent"],
+      "default": "engine",
+      "description": "engine = LoopEngine executes steps; agent = agent walks steps itself via MCP."
+    },
+    "context": {
+      "type": "object",
+      "description": "Initial context values available to all steps."
+    },
+    "deny_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^net$|^fs:(read|write):.+$"
+      },
+      "description": "Code-block capabilities forbidden anywhere in this loop."
+    },
+    "notify": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["info", "needs_input", "critical"]
+      },
+      "description": "Which notification priorities this loop emits (default: all three)."
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "max_cost": { "type": "number", "exclusiveMinimum": 0 },
+        "max_tokens": { "type": "integer", "exclusiveMinimum": 0 },
+        "max_steps": { "type": "integer", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "error_policy": {
+      "type": "object",
+      "properties": {
+        "retry": { "type": "integer", "minimum": 0 },
+        "backoff": { "type": "number", "minimum": 0 },
+        "on_failure": {
+          "type": "string",
+          "enum": ["abort", "skip", "retry", "fallback"]
+        },
+        "fallback_model": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["type", "name"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "llm",
+            "shell",
+            "http",
+            "mcp",
+            "code",
+            "human",
+            "parallel",
+            "conditional"
+          ]
+        },
+        "name": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "llm" } } },
+          "then": {
+            "required": ["prompt"],
+            "properties": {
+              "model": { "type": "string" },
+              "prompt": { "type": "string" },
+              "timeout": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "shell" } } },
+          "then": {
+            "required": ["command"],
+            "properties": {
+              "command": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                ]
+              },
+              "cwd": { "type": "string" },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "timeout": { "type": "number", "exclusiveMinimum": 0 },
+              "capture_output": { "type": "boolean" },
+              "check": { "type": "boolean" },
+              "shell": { "type": "boolean" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "http" } } },
+          "then": {
+            "required": ["url"],
+            "properties": {
+              "url": { "type": "string" },
+              "method": { "type": "string" },
+              "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+              "json_data": {},
+              "data": { "type": "string" },
+              "timeout": { "type": "number", "exclusiveMinimum": 0 },
+              "json_output": { "type": "boolean" },
+              "allowed_status": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "mcp" } } },
+          "then": {
+            "required": ["tool_name", "server_command"],
+            "properties": {
+              "server_command": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                ]
+              },
+              "tool_name": { "type": "string", "minLength": 1 },
+              "arguments": { "type": "object" },
+              "timeout": { "type": "number", "exclusiveMinimum": 0 },
+              "cwd": { "type": "string" },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "code" } } },
+          "then": {
+            "required": ["ref"],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*@\\d+\\.\\d+\\.\\d+$",
+                "description": "Code block reference 'name@X.Y.Z' from the code_blocks store."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Optional pin; execution fails fast on mismatch."
+              },
+              "input": { "type": "object" },
+              "timeout": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "human" } } },
+          "then": {
+            "required": ["question"],
+            "properties": {
+              "question": { "type": "string", "minLength": 1 },
+              "ask": { "type": "string", "minLength": 1, "default": "agent" },
+              "options": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional answer choices shown to the responder."
+              },
+              "timeout": {
+                "type": "string",
+                "pattern": "^(?:\\d+[smhd])+$",
+                "description": "How long to wait for an answer, e.g. '30m' or '1h30m'."
+              },
+              "default_answer": {},
+              "on_timeout": {
+                "type": "string",
+                "enum": ["default_answer", "skip", "fail", "escalate"],
+                "default": "default_answer"
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "parallel" } } },
+          "then": {
+            "required": ["steps"],
+            "properties": {
+              "steps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["type", "name"],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": ["llm", "shell", "http", "mcp", "code", "human"]
+                    },
+                    "name": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "conditional" } } },
+          "then": {
+            "required": ["condition", "then"],
+            "properties": {
+              "condition": { "type": "string", "minLength": 1 },
+              "then": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/node" } },
+              "else": { "type": "array", "items": { "$ref": "#/$defs/node" } }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
