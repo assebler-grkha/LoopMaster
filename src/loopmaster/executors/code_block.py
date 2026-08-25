@@ -201,45 +201,67 @@ class CodeBlockExecutor(BaseExecutor):
         )
         out_thread.start()
         err_thread.start()
+        stdin_error: str | None = None
         try:
             stdin = proc.stdin
             if stdin is not None:
                 stdin.write(json.dumps(payload, default=str))
                 stdin.close()
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            stdin_error = f"{type(exc).__name__}: {exc}"
         try:
             proc.wait(timeout=self.timeout)
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
             out_thread.join(timeout=1.0)
             err_thread.join(timeout=1.0)
-            return CodeBlockResult(error=f"code block '{self.ref}' timed out after {self.timeout}s")
+            stdout_partial = out_holder.get("v", ("", False))[0]
+            stderr_partial = err_holder.get("v", ("", False))[0]
+            detail = f"; partial stdout: {stdout_partial[-500:]!r}" if stdout_partial else ""
+            return CodeBlockResult(
+                stdout=stdout_partial[-STDOUT_LIMIT:],
+                stderr=stderr_partial[-STDOUT_LIMIT:],
+                returncode=-1,
+                error=f"code block '{self.ref}' timed out after {self.timeout}s{detail}",
+            )
         out_thread.join(timeout=5.0)
         err_thread.join(timeout=5.0)
+        if out_thread.is_alive() or err_thread.is_alive():
+            stdout_partial = out_holder.get("v", ("", False))[0]
+            stderr_partial = err_holder.get("v", ("", False))[0]
+            return CodeBlockResult(
+                stdout=stdout_partial[-STDOUT_LIMIT:],
+                stderr=stderr_partial[-STDOUT_LIMIT:],
+                returncode=proc.returncode or 0,
+                error=(
+                    f"code block '{self.ref}': child process still holding output pipes; "
+                    "partial capture returned"
+                ),
+            )
         stdout, stdout_overflow = out_holder.get("v", ("", False))
         stderr, _stderr_overflow = err_holder.get("v", ("", False))
         if stdout_overflow or _stderr_overflow:
+            limit_note = (
+                f"code block '{self.ref}' exceeded the {STDOUT_LIMIT}-character output limit"
+            )
+            if stdin_error:
+                limit_note += f"; stdin write failed ({stdin_error})"
             return CodeBlockResult(
                 stdout=stdout[-STDOUT_LIMIT:],
                 stderr=stderr[-STDOUT_LIMIT:],
                 returncode=proc.returncode or 0,
-                error=(f"code block '{self.ref}' exceeded the {STDOUT_LIMIT}-byte output limit"),
+                error=limit_note,
+            )
+        if stdin_error:
+            return CodeBlockResult(
+                stdout=stdout,
+                stderr=stderr,
+                returncode=proc.returncode or 0,
+                error=f"code block '{self.ref}': stdin write failed ({stdin_error})",
             )
         return stdout, stderr, proc.returncode or 0
 
     def _interpret(self, stdout: str, stderr: str, returncode: int) -> CodeBlockResult:
-        if len(stdout) > STDOUT_LIMIT:
-            return CodeBlockResult(
-                stdout=stdout[:STDOUT_LIMIT],
-                stderr=stderr,
-                returncode=returncode,
-                error=(
-                    f"code block '{self.ref}' produced {len(stdout)} bytes of stdout "
-                    f"(limit {STDOUT_LIMIT})"
-                ),
-            )
-
         try:
             reply = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError as exc:

@@ -159,9 +159,12 @@ def loop_status(job_id: str) -> str:
     if job.status in ("running", "in_progress"):
         # waiting_input is excluded: HITL waits are idle by design and get no
         # heartbeats, so a stale check there would fail live jobs.
-        host_pid = (job.metrics or {}).get("host_pid")
+        metrics = job.metrics or {}
+        host_pid = metrics.get("host_pid")
         owner_dead = host_pid is not None and host_pid != os.getpid() and not is_pid_alive(host_pid)
-        stale = time.time() - job.updated_at > 900
+        # Agent-driven jobs have no watcher/heartbeat: long gaps between
+        # loop_record calls are legitimate, so only the owner check applies.
+        stale = time.time() - job.updated_at > 900 and metrics.get("execution") != "agent"
         if owner_dead or stale:
             reason = (
                 f"Server process (pid {host_pid}) exited before completion"

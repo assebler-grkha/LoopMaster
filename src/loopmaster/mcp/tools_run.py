@@ -20,10 +20,12 @@ from loopmaster.cost.tracker import CostTracker
 from loopmaster.llm import LLMClient, get_llm_config
 from loopmaster.mcp.discovery import find_loop_files, load_loop_def, load_loop_def_object
 from loopmaster.mcp.runtime import mcp
+from loopmaster.mcp.store_models import TERMINAL_STATUSES
 from loopmaster.mcp.tools_blocks import validate_code_refs
 from loopmaster.mcp.tools_notifications import with_pending
 from loopmaster.metrics.collector import MetricsCollector
 from loopmaster.spec import SpecValidationError, load_loop_from_dict
+from loopmaster.spec.loader import _collect_leaf_names
 
 
 def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
@@ -53,7 +55,7 @@ def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
         return json.dumps({"error": f"Invalid context JSON: {exc}"})
 
     if mode == "agent":
-        return _create_agent_job(data, spec)
+        return _create_agent_job(data, spec, ctx_data)
 
     job_id = rt.runner.submit(
         loop_def,
@@ -78,13 +80,18 @@ def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
     )
 
 
-def _create_agent_job(data: dict[str, Any], spec: Any) -> str:
+def _create_agent_job(data: dict[str, Any], spec: Any, ctx_data: dict[str, Any]) -> str:
     """Create an agent-execution job: no worker thread, the calling agent runs steps."""
     job_id = f"{spec.name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     rt.store.create_job(
         job_id=job_id,
         loop_name=spec.name,
-        definition={"spec": data, "step_count": len(spec.step_names()), "execution": "agent"},
+        definition={
+            "spec": data,
+            "step_count": len(spec.step_names()),
+            "execution": "agent",
+            "initial_context": ctx_data,
+        },
         status="ready",
         total_steps=len(spec.step_names()),
         metrics={"host_pid": os.getpid(), "execution": "agent"},
@@ -96,11 +103,13 @@ def _create_agent_job(data: dict[str, Any], spec: Any) -> str:
                 "status": "ready",
                 "loop_name": spec.name,
                 "execution_mode": "agent",
+                "context": ctx_data,
                 "steps": spec.step_names(),
                 "message": (
                     "Agent-execution job created. Execute each root step yourself (llm steps "
                     "= your own model) and record progress via loop_record(job_id, step_name); "
-                    "the job auto-completes when every step is recorded."
+                    "the job auto-completes when every step is recorded. For conditional specs "
+                    "call loop_record(..., finalize=true) after the taken branch is recorded."
                 ),
             }
         ),
@@ -115,17 +124,30 @@ def loop_record(
     success: bool = True,
     output: str | None = None,
     error: str | None = None,
+    finalize: bool = False,
 ) -> str:
     """Record the result of an agent-executed step (execution mode 'agent').
 
     Call once per root step from the plan returned by loop_run(mode='agent').
     The job transitions ready -> in_progress and auto-completes when all
     recorded steps cover total_steps. Failed steps keep the run in_progress
-    with an error attached; finalize explicitly via this tool semantics.
+    with an error attached. For conditional specs (where only one branch
+    executes, so total_steps can never be reached) pass finalize=true on the
+    last record to complete the job explicitly.
     """
     job = rt.store.get_job(job_id)
     if not job:
         return json.dumps({"error": f"Job '{job_id}' not found."})
+    if job.status in TERMINAL_STATUSES:
+        return json.dumps({"error": f"Job '{job_id}' is already terminal (status '{job.status}')."})
+
+    spec = (job.definition or {}).get("spec") or {}
+    known: list[str] = []
+    _collect_leaf_names(spec.get("steps") or [], known)
+    if step_name not in known:
+        return json.dumps(
+            {"error": f"Unknown step '{step_name}'; plan steps are: {sorted(set(known))}."}
+        )
 
     parsed_output: Any = None
     if output is not None:
@@ -143,6 +165,8 @@ def loop_record(
     )
     if updated is None:
         return json.dumps({"error": f"Failed to record step for '{job_id}'."})
+    if finalize and updated.status not in TERMINAL_STATUSES:
+        updated = rt.store.update_job(job_id=job_id, status="completed", completed=True) or updated
     return json.dumps(
         with_pending(
             {

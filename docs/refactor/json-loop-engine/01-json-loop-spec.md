@@ -174,3 +174,10 @@ JsonLoader транслирует LoopSpec → существующие объе
 - `parallel` в agent-режиме деградирует до последовательного выполнения (если агент не может распараллелить сам).
 
 Выбор режима: поле `execution` в спеке или override при `loop_run(mode="agent")`. Движок при `mode="agent"` ничего не исполняет — только ведёт учёт прогресса (state machine + чекпоинты).
+
+### Реализованный контракт agent-режима (`loop_record`)
+
+- `loop_run(spec_json, mode="agent")` создаёт job со статусом `ready`, сохраняет `context` вызывающего в `definition.initial_context` и возвращает план шагов; воркер не запускается.
+- Агент отчитывается **`loop_record(job_id, step_name, success=True, output=None, error=None, finalize=False)`** после каждого шага: `step_name` обязан совпадать с именем из плана; job проходит `ready → in_progress`; авто-завершение — когда записаны все листья плана.
+- Для conditional-спек (исполняется одна ветка, `total_steps` недостижим) последний отчёт делается с `finalize=true` — job завершается явно.
+- Отчёт по терминальному job или с неизвестным именем шага возвращает ошибку. Agent-jobs освобождены от stale-детектора (15 мин) в `loop_status` — проверяется только живость host-процесса; осиротевшие `ready` agent-jobs подметаются `mark_interrupted_jobs_on_startup`.

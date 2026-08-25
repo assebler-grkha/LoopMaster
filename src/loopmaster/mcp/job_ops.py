@@ -312,21 +312,38 @@ class JobOpsMixin(StoreHost):
         return is_pid_alive(pid)
 
     def mark_interrupted_jobs_on_startup(self) -> int:
-        """Mark orphan 'running'/'in_progress' jobs as 'interrupted' on startup.
+        """Mark orphan active jobs as 'interrupted' on startup.
 
         Jobs whose recorded host_pid is still alive are skipped: duplicate MCP
         server instances share this DB and must not kill each other's live jobs.
+        'ready' jobs are only reaped when they carry an explicitly dead
+        host_pid (agent-mode jobs); bare 'ready' rows without metrics belong to
+        legacy flows and stay untouched.
         """
         interrupted = 0
         with self._lock:
             now = time.time()
             cur = self.conn.cursor()
             cur.execute(
-                "SELECT job_id, metrics FROM jobs "
-                "WHERE status IN ('running', 'in_progress', 'waiting_input')"
+                "SELECT job_id, status, metrics FROM jobs "
+                "WHERE status IN ('ready', 'running', 'in_progress', 'waiting_input')"
             )
             rows = cur.fetchall()
             for row in rows:
+                if row["status"] == "ready":
+                    try:
+                        metrics = json.loads(row["metrics"]) if row["metrics"] else {}
+                    except json.JSONDecodeError:
+                        metrics = {}
+                    pid = metrics.get("host_pid")
+                    if pid is None or is_pid_alive(pid):
+                        continue
+                    cur.execute(
+                        "UPDATE jobs SET status = 'interrupted', updated_at = ? WHERE job_id = ?",
+                        (now, row["job_id"]),
+                    )
+                    interrupted += cur.rowcount
+                    continue
                 if self._host_pid_alive(row["metrics"]):
                     continue
                 cur.execute(

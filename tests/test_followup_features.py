@@ -1,12 +1,14 @@
 """Tests for agent-mode execution (M4), stdout streaming limit (L2), and loader/compiler NITs."""
 
 import json
+import time
 
 import pytest
 
 import loopmaster.mcp.runtime as rt
 from loopmaster.mcp.job_store import JobStore
-from loopmaster.mcp.tools_run import loop_run
+from loopmaster.mcp.tools_loops import loop_status
+from loopmaster.mcp.tools_run import loop_record, loop_run
 from loopmaster.spec.compiler import compile_loop_spec
 from loopmaster.spec.loader import load_loop_from_dict, validate_loop_spec
 
@@ -16,6 +18,23 @@ AGENT_SPEC = {
     "version": "1.0.0",
     "execution": "agent",
     "steps": [{"type": "llm", "name": "think", "prompt": "Do the thing."}],
+}
+
+COND_SPEC = {
+    "loopmaster": "1.0",
+    "name": "cond-agent",
+    "version": "1.0.0",
+    "execution": "agent",
+    "context": {"flag": True},
+    "steps": [
+        {
+            "type": "conditional",
+            "name": "route",
+            "condition": "{flag}",
+            "then": [{"type": "llm", "name": "yes-step", "prompt": "yes"}],
+            "else": [{"type": "llm", "name": "no-step", "prompt": "no"}],
+        }
+    ],
 }
 
 
@@ -29,11 +48,18 @@ def _bind(tmp_path):
     return store, old_store, old_runner
 
 
+def _start_agent_job(store, spec=AGENT_SPEC, context=None):
+    kwargs = {"spec_json": json.dumps(spec), "mode": "agent"}
+    if context is not None:
+        kwargs["context"] = json.dumps(context)
+    return json.loads(loop_run(**kwargs))
+
+
 class TestAgentMode:
     def test_agent_job_is_ready_without_worker(self, tmp_path):
         store, old_store, old_runner = _bind(tmp_path)
         try:
-            out = json.loads(loop_run(spec_json=json.dumps(AGENT_SPEC), mode="agent"))
+            out = _start_agent_job(store)
             assert out["status"] == "ready"
             job = store.get_job(out["job_id"])
             assert job is not None
@@ -45,13 +71,9 @@ class TestAgentMode:
     def test_loop_record_progresses_to_completed(self, tmp_path):
         store, old_store, old_runner = _bind(tmp_path)
         try:
-            out = json.loads(loop_run(spec_json=json.dumps(AGENT_SPEC), mode="agent"))
+            out = _start_agent_job(store)
             job_id = out["job_id"]
-            rec = json.loads(
-                __import__("loopmaster.mcp.tools_run", fromlist=["loop_record"]).loop_record(
-                    job_id=job_id, step_name="think", output=json.dumps({"done": True})
-                )
-            )
+            rec = json.loads(loop_record(job_id=job_id, step_name="think", output='{"done":true}'))
             assert rec["recorded"] is True
             job = store.get_job(job_id)
             assert job.status == "completed"
@@ -61,11 +83,100 @@ class TestAgentMode:
     def test_record_unknown_job_404(self, tmp_path):
         _bind(tmp_path)
         try:
-            tools_run = __import__("loopmaster.mcp.tools_run", fromlist=["loop_record"])
-            out = json.loads(tools_run.loop_record(job_id="nope", step_name="x"))
+            out = json.loads(loop_record(job_id="nope", step_name="x"))
             assert "error" in out
         finally:
             pass
+
+    def test_context_is_persisted_and_echoed(self, tmp_path):
+        store, old_store, old_runner = _bind(tmp_path)
+        try:
+            out = _start_agent_job(store, context={"goal": "ship"})
+            assert out["context"] == {"goal": "ship"}
+            job = store.get_job(out["job_id"])
+            assert job.definition.get("initial_context") == {"goal": "ship"}
+        finally:
+            rt.store, rt.runner = old_store, old_runner
+
+    def test_conditional_requires_finalize(self, tmp_path):
+        store, old_store, old_runner = _bind(tmp_path)
+        try:
+            out = _start_agent_job(store, COND_SPEC)
+            job_id = out["job_id"]
+            rec = json.loads(loop_record(job_id=job_id, step_name="yes-step"))
+            assert rec["recorded"] is True
+            assert store.get_job(job_id).status == "in_progress"
+            fin = json.loads(loop_record(job_id=job_id, step_name="yes-step", finalize=True))
+            assert fin["recorded"] is True
+            assert store.get_job(job_id).status == "completed"
+        finally:
+            rt.store, rt.runner = old_store, old_runner
+
+    def test_record_on_terminal_job_rejected(self, tmp_path):
+        store, old_store, old_runner = _bind(tmp_path)
+        try:
+            out = _start_agent_job(store)
+            loop_record(job_id=out["job_id"], step_name="think")
+            rec = json.loads(loop_record(job_id=out["job_id"], step_name="think"))
+            assert "already terminal" in rec.get("error", "")
+        finally:
+            rt.store, rt.runner = old_store, old_runner
+
+    def test_unknown_step_rejected_with_plan(self, tmp_path):
+        store, old_store, old_runner = _bind(tmp_path)
+        try:
+            out = _start_agent_job(store)
+            rec = json.loads(loop_record(job_id=out["job_id"], step_name="fabricated"))
+            assert "Unknown step 'fabricated'" in rec.get("error", "")
+            assert "think" in rec["error"]
+        finally:
+            rt.store, rt.runner = old_store, old_runner
+
+    def test_agent_job_not_marked_stale(self, tmp_path):
+        store, old_store, old_runner = _bind(tmp_path)
+        try:
+            out = _start_agent_job(store)
+            job_id = out["job_id"]
+            with store._lock:  # noqa: SLF001
+                cur = store.conn.cursor()
+                cur.execute(
+                    "UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+                    (time.time() - 10_000, job_id),
+                )
+                store.conn.commit()
+                cur.close()
+            status = json.loads(loop_status(job_id))
+            assert status.get("failed") is not True
+            assert store.get_job(job_id).status == "ready"
+        finally:
+            rt.store, rt.runner = old_store, old_runner
+
+    def test_orphaned_ready_job_swept_only_with_dead_pid(self, tmp_path):
+        store, old_store, old_runner = _bind(tmp_path)
+        try:
+            out = _start_agent_job(store)
+            job_id = out["job_id"]
+            with store._lock:  # noqa: SLF001
+                cur = store.conn.cursor()
+                cur.execute(
+                    "UPDATE jobs SET metrics = ? WHERE job_id = ?",
+                    (json.dumps({"host_pid": 999_999_999, "execution": "agent"}), job_id),
+                )
+                store.conn.commit()
+                cur.close()
+            assert store.mark_interrupted_jobs_on_startup() >= 1
+            assert store.get_job(job_id).status == "interrupted"
+
+            out2 = _start_agent_job(store)
+            with store._lock:  # noqa: SLF001
+                cur = store.conn.cursor()
+                cur.execute("UPDATE jobs SET metrics = NULL WHERE job_id = ?", (out2["job_id"],))
+                store.conn.commit()
+                cur.close()
+            store.mark_interrupted_jobs_on_startup()
+            assert store.get_job(out2["job_id"]).status == "ready"
+        finally:
+            rt.store, rt.runner = old_store, old_runner
 
 
 class TestStreamingLimit:
@@ -146,3 +257,16 @@ class TestCompilerTimeout:
         node = compiled["steps"][0]
         assert node["type"] == "llm"
         assert node["timeout"] == 42
+
+
+class TestLlmTimeoutValidation:
+    @pytest.mark.parametrize("bad", ["banana", -5, 0])
+    def test_invalid_llm_timeout_rejected(self, bad):
+        spec = {
+            "loopmaster": "1.0",
+            "name": "bad-timeout",
+            "version": "1.0.0",
+            "steps": [{"type": "llm", "name": "a", "prompt": "go", "timeout": bad}],
+        }
+        errors = validate_loop_spec(spec)
+        assert any("'timeout'" in e for e in errors)

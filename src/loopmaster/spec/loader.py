@@ -379,6 +379,7 @@ def _validate_node(node: Any, at: str, errors: list[str], leaf_only: bool = Fals
         model = node.get("model")
         if model is not None and not isinstance(model, str):
             _err(errors, at, "llm 'model' must be a string or alias (@fast)")
+        _check_positive_number(node, "timeout", at, errors)
 
     elif ntype == "shell":
         command = node.get("command")
