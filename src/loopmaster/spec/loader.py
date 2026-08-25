@@ -229,7 +229,7 @@ def _validate(node: Any, at: str) -> list[str]:
 
     name = node.get("name")
     if not isinstance(name, str) or not _NAME_RE.match(name):
-        _err(errors, at, "'name' must match ^[a-z][a-z0-9-]*$")
+        _err(errors, at, "'name' must match ^[a-z][a-z0-9_-]*$")
 
     version = node.get("version")
     if not isinstance(version, str) or not _SEMVER_RE.match(version):

@@ -26,7 +26,7 @@ CREATE INDEX idx_code_blocks_name ON code_blocks(name);
 ## 2. Ссылка из LoopSpec
 
 ```json
-{ "id": "fix", "type": "code", "ref": "test-fixer@1.4.2", "sha256": "9f2c…", "input": {...} }
+{ "name": "fix", "type": "code", "ref": "test-fixer@1.4.2", "sha256": "9f2c…", "input": {...}, "timeout": 60 }
 ```
 
 - `ref` обязателен, формат `name@semver`.

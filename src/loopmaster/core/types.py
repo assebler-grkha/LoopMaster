@@ -217,6 +217,7 @@ class Parallel:
 
     def __init__(self, *steps: Step):
         self.steps = list(steps)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         from .engine import _get_current_steps

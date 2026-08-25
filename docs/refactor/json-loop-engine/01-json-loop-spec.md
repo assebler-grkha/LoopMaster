@@ -1,12 +1,13 @@
 # LoopSpec v1 — JSON-формат определения цикла
 
-> Статус: PROPOSAL. JSON-конфигурация цикла как execution format. Python DSL остаётся authoring format (ADR-011).
+> Статус: РЕАЛИЗОВАН (Ф1–Ф6). JSON-конфигурация цикла как execution format. Python DSL остаётся authoring format (ADR-011); компилятор DSL→JSON — `src/loopmaster/spec/compiler.py`, CLI `loop-engine export FILE --format json`.
 
 ## 1. Топ-уровень
 
 ```json
 {
-  "loop": "code-review",              // обяз.: имя (slug)
+  "loopmaster": "1.0",                // обяз.: маркер версии спеки (SPEC_VERSION)
+  "name": "code-review",              // обяз.: имя (slug, ^[a-z][a-z0-9_-]*$)
   "version": "1.0.0",                 // обяз.: SemVer
   "description": "...",
   "execution": "engine",              // engine | agent (см. §8; дефолт engine)
@@ -15,79 +16,96 @@
     "retry": 3, "backoff": 1.0,
     "on_failure": "abort"             // abort|skip|retry|fallback
   },
-  "variables": { "repo": ".", "lang": "python" },   // стартовый контекст
+  "notify": ["info", "needs_input", "critical"],   // фильтр уведомлений (см. 04)
+  "context": { "repo": ".", "lang": "python" },    // стартовый контекст
   "deny_capabilities": ["net"],       // запрет capabilities для code-блоков
   "steps": [ /* см. §2 */ ]
 }
 ```
 
-Валидация двухслойная: JSON Schema (`schemas/loopspec-v1.schema.json`) → семантический валидатор (уникальность `id`, ссылки на блоки существуют и sha256 совпадает, условия парсятся AST-парсером, `{var}`-шаблоны разрешимы best-effort).
+Валидация двухслойная: JSON Schema (`schemas/loopspec-v1.schema.json`) → семантический валидатор (уникальность `name`, AST-парсинг условий, разрешимость `{var}`-шаблонов против контекста и выводов предыдущих шагов; существование code-блоков и sha256 проверяется на слое MCP — `validate_code_refs` в `loop_save`/`loop_run`).
 
 ## 2. Типы узлов (8)
 
+Каждый узел имеет обязательное поле `name` (уникально в пределах цикла).
+
 ### 2.1 `llm` — вызов модели
 ```json
-{ "id": "analyze", "type": "llm", "model": "@coding",
-  "prompt": "Проанализируй diff:\n{fetch.output}",
-  "system": "Ты ревьюер.", "save_as": "analysis" }
+{ "name": "analyze", "type": "llm",
+  "model": "@coding",
+  "prompt": "Проанализируй diff:\n{fetch.stdout}",
+  "timeout": 120 }
 ```
-`model` — идентификатор или алиас реестра (`@fast`, `@smart`, …) — без изменений. Результат шага доступен как `{<id>}` либо `{save_as}`.
+`model` — идентификатор или алиас реестра (`@fast`, `@smart`, …). Результат шага доступен как `{<name>}`. `timeout` (сек) компилируется в Step.
 
 ### 2.2 `shell`
 ```json
-{ "id": "fetch", "type": "shell", "run": "git -C {repo} diff --stat", "timeout_s": 30 }
+{ "name": "fetch", "type": "shell",
+  "command": "git -C {repo} diff --stat",
+  "cwd": ".", "env": { "GIT_PAGER": "cat" },
+  "capture_output": true, "check": false, "shell": false,
+  "timeout": 30 }
 ```
 
 ### 2.3 `http`
 ```json
-{ "id": "ci_status", "type": "http", "method": "GET", "url": "https://ci/api/{repo}/status", "headers": {} }
+{ "name": "ci_status", "type": "http", "method": "GET",
+  "url": "https://ci/api/{repo}/status",
+  "headers": { "Accept": "application/json" },
+  "json_data": null, "data": null,
+  "json_output": true, "allowed_status": [200, 201],
+  "timeout": 30 }
 ```
 
 ### 2.4 `mcp` — обращение к MCP-серверу/инструменту
 ```json
-{ "id": "search", "type": "mcp", "server": "api-mega-list", "tool": "search_apis_tool",
-  "input": { "query": "{topic}" }, "timeout_s": 60 }
+{ "name": "search", "type": "mcp",
+  "server_command": ["python", "-m", "api_mega_list_mcp"],
+  "tool_name": "search_apis_tool",
+  "arguments": { "query": "{topic}" },
+  "cwd": null, "env": null,
+  "timeout": 60 }
 ```
 Исполняется существующим MCPToolExecutor (NDJSON stdio). Ответ сервера = output шага.
 
 ### 2.5 `code` — импорт блока из БД
 ```json
-{ "id": "fix", "type": "code", "ref": "test-fixer@1.4.2", "sha256": "9f2c…",
-  "input": { "mode": "fast" } }
+{ "name": "fix", "type": "code", "ref": "test-fixer@1.4.2", "sha256": "9f2c…",
+  "input": { "mode": "fast" }, "timeout": 60 }
 ```
 См. [02-code-block-store.md](02-code-block-store.md).
 
 ### 2.6 `human` — вопрос агенту/человеку, durable pause
 ```json
-{ "id": "confirm", "type": "human",
+{ "name": "confirm", "type": "human",
   "question": "Применяю патч из {fix}. Продолжать?",
+  "ask": "agent",                   // agent | human | mcp:<server>
   "options": ["yes", "no", "edit"],
-  "default_answer": "yes",
   "timeout": "24h",
-  "on_timeout": "default_answer",   // default_answer|skip|fail|escalate
-  "ask": "agent"                    // agent | human | mcp:<server>
+  "default_answer": "yes",
+  "on_timeout": "default_answer"    // default_answer|skip|fail|escalate
 }
 ```
-См. [03-hitl-protocol.md](03-hitl-protocol.md).
+`timeout` — duration-строка (`30m`, `24h`, `1h30m`). `escalate` создаёт critical-notification и продлевает ожидание на ещё один период (см. 03/04). См. [03-hitl-protocol.md](03-hitl-protocol.md).
 
 ### 2.7 `parallel`
 ```json
-{ "id": "reviews", "type": "parallel",
+{ "name": "reviews", "type": "parallel",
   "steps": [
-    { "id": "security", "type": "llm", "model": "@smart", "prompt": "Security: {fetch.output}" },
-    { "id": "style",    "type": "llm", "model": "@fast",  "prompt": "Style: {fetch.output}" }
+    { "name": "security", "type": "llm", "model": "@smart", "prompt": "Security: {fetch.stdout}" },
+    { "name": "style",    "type": "llm", "model": "@fast",  "prompt": "Style: {fetch.stdout}" }
   ] }
 ```
-Один уровень вложенности в v1; результаты доступны по внутренним id.
+Один уровень вложенности в v1; результаты доступны по внутренним `name`. Поле `name` у узла опционально при компиляции из DSL, но loader требует его всегда — компилятор генерирует автоимя `group-N`. **В engine-режиме v1 дети parallel исполняются последовательно** (общий контекст не потокобезопасен; true-concurrency — в ROADMAP v2). Ссылки между sibling'ами внутри одной группы запрещены валидацией.
 
 ### 2.8 `conditional`
 ```json
-{ "id": "gate", "type": "conditional",
-  "if": "'critical' in analysis",
+{ "name": "gate", "type": "conditional",
+  "condition": "'critical' in analysis",
   "then": [ /* узлы */ ],
   "else": [ /* узлы */ ] }
 ```
-Выражение `if` — строка синтаксиса существующего AST-whitelist парсера (`core/condition.py`). Ветвление вычисляется на контексте snapshot'а; branch stickiness при resume сохраняется штатно.
+Выражение `condition` — строка синтаксиса AST-whitelist парсера (`core/condition.py`: сравнения, and/or/not, имена, литералы, унарный минус для чисел); `{var}`-плейсхолдеры подставляются перед парсингом. Ветвление вычисляется на контексте snapshot'а; branch stickiness при resume сохраняется штатно.
 
 ## 3. Компиляция в IR
 
@@ -95,9 +113,9 @@ JsonLoader транслирует LoopSpec → существующие объе
 
 | LoopSpec узел | Объект ядра |
 |---|---|
-| llm/shell/http/mcp/code/human | `Step(name=id, model=…, tool=…, executor=…)` + executor-фабрика |
-| parallel | `Parallel(*steps)` |
-| conditional | `Conditional(expr, then_steps, else_steps)` |
+| llm/shell/http/mcp/code/human | `Step(name=…, model=…, executor=…) + executor (ShellExecutor/HTTPExecutor/MCPToolExecutor/CodeBlockExecutor/HumanInputExecutor) |
+| parallel | `Parallel(*steps)` — в engine-режиме v1 дети исполняются последовательно |
+| conditional | `Conditional(condition, then_steps, else_steps)` |
 
 Ядро движка, budget, ErrorPolicy, heartbeat, checkpoint/replay — **без изменений**. Новые executor'ы: CodeBlockExecutor, HumanInputExecutor (последний не «выполняет», а ставит паузу — см. 03).
 
@@ -109,18 +127,19 @@ JsonLoader транслирует LoopSpec → существующие объе
 
 ```json
 {
-  "loop": "nightly-repo-audit",
+  "loopmaster": "1.0",
+  "name": "nightly-repo-audit",
   "version": "1.2.0",
   "budget": { "max_cost": 3.00 },
-  "variables": { "repo": "C:/Projects/Ideas/LoopMaster" },
+  "context": { "repo": "C:/Projects/Ideas/LoopMaster" },
   "steps": [
-    { "id": "fetch",   "type": "shell", "run": "git -C {repo} log --oneline -20 && git -C {repo} diff HEAD~5 --stat" },
-    { "id": "audit",   "type": "llm", "model": "@coding", "prompt": "Найди риски в изменениях:\n{fetch}" },
-    { "id": "deepen",  "type": "code", "ref": "risk-scanner@0.3.0", "input": { "findings": "{audit}" } },
-    { "id": "gate",    "type": "conditional", "if": "'high' in deepen.risk_level",
-      "then": [ { "id": "alert", "type": "human", "question": "High-risk находки: {deepen}. Действия?", "options": ["review","ignore"] } ],
-      "else": [ { "id": "log_only", "type": "shell", "run": "echo low-risk" } ] },
-    { "id": "report",  "type": "llm", "model": "@fast", "prompt": "Итоговый отчёт: {audit} / {deepen}" }
+    { "name": "fetch",   "type": "shell", "command": "git -C {repo} log --oneline -20" },
+    { "name": "audit",   "type": "llm", "model": "@coding", "prompt": "Найди риски в изменениях:\n{fetch.stdout}" },
+    { "name": "deepen",  "type": "code", "ref": "risk-scanner@0.3.0", "input": { "findings": "{audit}" } },
+    { "name": "gate",    "type": "conditional", "condition": "'high' in deepen.risk_level",
+      "then": [ { "name": "alert", "type": "human", "question": "High-risk находки: {deepen.output}. Действия?", "options": ["review","ignore"], "default_answer": "review" } ],
+      "else": [ { "name": "log_only", "type": "shell", "command": "echo low-risk" } ] },
+    { "name": "report",  "type": "llm", "model": "@fast", "prompt": "Итоговый отчёт: {audit} / {deepen}" }
   ]
 }
 ```

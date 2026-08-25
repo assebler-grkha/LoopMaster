@@ -118,7 +118,8 @@ class HumanInputExecutor(BaseExecutor):
             self._set_status(store, job_id, "waiting_input")
             self._notify_waiting(store, job_id, text, message.msg_id, from_addr)
 
-        deadline = time.time() + parse_duration(self.timeout) if self.timeout else None
+        timeout_s = parse_duration(self.timeout) if self.timeout else None
+        deadline = time.time() + timeout_s if timeout_s is not None else None
         while True:
             current = store.get_message(message.msg_id)
             if current is not None and current.status == "answered":
@@ -137,6 +138,17 @@ class HumanInputExecutor(BaseExecutor):
                     error="input cancelled",
                 )
             if deadline is not None and time.time() >= deadline:
+                if self.on_timeout == "escalate":
+                    with contextlib.suppress(Exception):
+                        store.create_notification(
+                            priority="critical",
+                            event="escalation",
+                            summary=f"Unanswered input: {text[:120]}",
+                            job_id=job_id,
+                            detail={"msg_id": message.msg_id, "from_addr": from_addr},
+                        )
+                    deadline = time.time() + timeout_s if timeout_s is not None else None
+                    continue
                 break
             time.sleep(self.poll_s)
 

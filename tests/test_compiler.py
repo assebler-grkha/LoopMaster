@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from typing import Any
 
 import pytest
@@ -304,3 +305,25 @@ class TestRoundTrip:
     def test_compile_missing_file(self) -> None:
         with pytest.raises(CompileError, match="cannot read"):
             compile_loop_file("does-not-exist.py")
+
+    def test_decorated_loop_preserves_parallel(self, tmp_path: Any) -> None:
+        from pathlib import Path
+
+        source = textwrap.dedent(
+            """
+            from loopmaster.core.types import Loop, Parallel, Step
+
+            @Loop(name="par-file", version="1.0.0")
+            def run(ctx):
+                Step("fetch", model="x", prompt="go")
+                _ = (Parallel(Step("sec", model="x", prompt="s"), Step("sty", model="x", prompt="t")),)[0]
+                Step("merge", model="x", prompt="done {fetch.output}")
+            """
+        )
+        path = tmp_path / "par_loop.py"
+        path.write_text(source, encoding="utf-8")
+        compiled = compile_loop_file(path)
+        assert validate_loop_spec(compiled) == []
+        assert _types(compiled) == ["llm", "parallel", "llm"]
+        parallel_node = compiled["steps"][1]
+        assert [child["name"] for child in parallel_node["steps"]] == ["sec", "sty"]
