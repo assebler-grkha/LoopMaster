@@ -102,10 +102,34 @@ class SpecValidationError(Exception):
         super().__init__(f"Invalid LoopSpec{where}, {len(errors)} error(s):\n{details}")
 
 
+def _collect_leaf_names(nodes: list[Any], names: list[str]) -> None:
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type")
+        if ntype == "parallel":
+            _collect_leaf_names(node.get("steps") or [], names)
+        elif ntype == "conditional":
+            _collect_leaf_names(node.get("then") or [], names)
+            _collect_leaf_names(node.get("else") or [], names)
+        else:
+            name = node.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+
+
 def validate_loop_spec(data: Any) -> list[str]:
     """Validate a parsed spec dict. Returns a list of errors (empty = valid)."""
     errors: list[str] = _validate(data, "$")
     if not errors and isinstance(data, dict):
+        steps = data.get("steps") or []
+        leaf_names: list[str] = []
+        _collect_leaf_names(steps, leaf_names)
+        seen: set[str] = set()
+        for name in leaf_names:
+            if name in seen:
+                errors.append(f"$.steps: duplicate step name '{name}'")
+            seen.add(name)
         known = {k: "context" for k in (data.get("context") or {})}
         _walk_semantics(data.get("steps") or [], known, errors, "$.steps")
     return errors

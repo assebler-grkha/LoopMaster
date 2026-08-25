@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from loopmaster.cli.blocks import app as blocks_app
 from loopmaster.cli.json_loop import load_json_loop, print_json_plan
 
 app = typer.Typer(
@@ -16,6 +17,7 @@ app = typer.Typer(
     help="LoopMaster — Design, validate, and run AI agent loops.",
     add_completion=False,
 )
+app.add_typer(blocks_app, name="block", help="Manage reusable code blocks.")
 console = Console()
 
 

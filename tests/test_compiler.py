@@ -307,7 +307,6 @@ class TestRoundTrip:
             compile_loop_file("does-not-exist.py")
 
     def test_decorated_loop_preserves_parallel(self, tmp_path: Any) -> None:
-        from pathlib import Path
 
         source = textwrap.dedent(
             """

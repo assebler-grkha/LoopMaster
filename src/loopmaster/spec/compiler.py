@@ -188,6 +188,8 @@ def _compile_step(step: Step, at: str, deny_union: set[str]) -> dict[str, Any]:
     compiled: dict[str, Any] = {"type": "llm", "name": name, "prompt": step.prompt}
     if step.model:
         compiled["model"] = step.model
+    if step.timeout is not None:
+        compiled["timeout"] = step.timeout
     return compiled
 
 

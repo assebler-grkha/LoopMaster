@@ -55,3 +55,5 @@ CREATE INDEX idx_notif_unread ON notifications(read_by_agent, priority);
 
 - Не более 1 notification на шаг (промежуточные step_chunk'и не уведомляют).
 - `info`-события можно отключить per-job: `"notify": ["needs_input", "critical"]` в LoopSpec (дефолт — все три).
+
+> **Исключение:** notification `waiting_input` от human-шага создаётся **в обход** notify-фильтра — иначе фильтр без `needs_input` привёл бы к dead-lock (никто не узнает о pending вопросе). Фильтр применяется только к событиям жизненного цикла (`loop_started`, `loop_completed`, `loop_failed`).

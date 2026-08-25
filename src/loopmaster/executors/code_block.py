@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -150,6 +151,23 @@ class CodeBlockExecutor(BaseExecutor):
             return [sys.executable, str(script)]
         return ["bash", "-e", str(script_dir / block.entrypoint)]
 
+    @staticmethod
+    def _drain(stream: Any, limit: int) -> tuple[str, bool]:
+        """Read a pipe incrementally, keeping at most ``limit`` characters."""
+        chunks: list[str] = []
+        total = 0
+        overflow = False
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total <= limit:
+                chunks.append(chunk)
+            else:
+                overflow = True
+        return "".join(chunks), overflow
+
     def _run_subprocess(
         self, cmd: list[str], script_dir: Path, payload: dict[str, Any]
     ) -> tuple[str, str, int] | CodeBlockResult:
@@ -172,14 +190,43 @@ class CodeBlockExecutor(BaseExecutor):
         except OSError as exc:
             return CodeBlockResult(error=f"failed to spawn code block '{self.ref}': {exc}")
 
+        assert proc.stdout is not None and proc.stderr is not None
+        out_holder: dict[str, tuple[str, bool]] = {}
+        err_holder: dict[str, tuple[str, bool]] = {}
+        out_thread = threading.Thread(
+            target=lambda: out_holder.setdefault("v", self._drain(proc.stdout, STDOUT_LIMIT))
+        )
+        err_thread = threading.Thread(
+            target=lambda: err_holder.setdefault("v", self._drain(proc.stderr, STDOUT_LIMIT))
+        )
+        out_thread.start()
+        err_thread.start()
         try:
-            stdout, stderr = proc.communicate(
-                json.dumps(payload, default=str), timeout=self.timeout
-            )
+            stdin = proc.stdin
+            if stdin is not None:
+                stdin.write(json.dumps(payload, default=str))
+                stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            proc.wait(timeout=self.timeout)
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
+            out_thread.join(timeout=1.0)
+            err_thread.join(timeout=1.0)
             return CodeBlockResult(error=f"code block '{self.ref}' timed out after {self.timeout}s")
-        return stdout or "", stderr or "", proc.returncode or 0
+        out_thread.join(timeout=5.0)
+        err_thread.join(timeout=5.0)
+        stdout, stdout_overflow = out_holder.get("v", ("", False))
+        stderr, _stderr_overflow = err_holder.get("v", ("", False))
+        if stdout_overflow or _stderr_overflow:
+            return CodeBlockResult(
+                stdout=stdout[-STDOUT_LIMIT:],
+                stderr=stderr[-STDOUT_LIMIT:],
+                returncode=proc.returncode or 0,
+                error=(f"code block '{self.ref}' exceeded the {STDOUT_LIMIT}-byte output limit"),
+            )
+        return stdout, stderr, proc.returncode or 0
 
     def _interpret(self, stdout: str, stderr: str, returncode: int) -> CodeBlockResult:
         if len(stdout) > STDOUT_LIMIT:

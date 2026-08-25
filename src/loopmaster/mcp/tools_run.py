@@ -28,9 +28,9 @@ from loopmaster.spec import SpecValidationError, load_loop_from_dict
 
 def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
     """Run a LoopSpec v1 JSON document through the detached worker."""
-    if mode != "detached":
+    if mode not in ("detached", "agent"):
         return json.dumps(
-            {"error": f"mode '{mode}' is not supported for spec_json; use mode='detached'."}
+            {"error": f"mode '{mode}' is not supported for spec_json; use 'detached' or 'agent'."}
         )
 
     try:
@@ -52,6 +52,9 @@ def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
     except Exception as exc:
         return json.dumps({"error": f"Invalid context JSON: {exc}"})
 
+    if mode == "agent":
+        return _create_agent_job(data, spec)
+
     job_id = rt.runner.submit(
         loop_def,
         initial_context=ctx_data or dict(spec.initial_context),
@@ -69,6 +72,87 @@ def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
                     "Detached loop started in worker thread. "
                     "Use loop_status/loop_result to poll; loop_cancel to stop."
                 ),
+            }
+        ),
+        indent=2,
+    )
+
+
+def _create_agent_job(data: dict[str, Any], spec: Any) -> str:
+    """Create an agent-execution job: no worker thread, the calling agent runs steps."""
+    job_id = f"{spec.name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    rt.store.create_job(
+        job_id=job_id,
+        loop_name=spec.name,
+        definition={"spec": data, "step_count": len(spec.step_names()), "execution": "agent"},
+        status="ready",
+        total_steps=len(spec.step_names()),
+        metrics={"host_pid": os.getpid(), "execution": "agent"},
+    )
+    return json.dumps(
+        with_pending(
+            {
+                "job_id": job_id,
+                "status": "ready",
+                "loop_name": spec.name,
+                "execution_mode": "agent",
+                "steps": spec.step_names(),
+                "message": (
+                    "Agent-execution job created. Execute each root step yourself (llm steps "
+                    "= your own model) and record progress via loop_record(job_id, step_name); "
+                    "the job auto-completes when every step is recorded."
+                ),
+            }
+        ),
+        indent=2,
+    )
+
+
+@mcp.tool()
+def loop_record(
+    job_id: str,
+    step_name: str,
+    success: bool = True,
+    output: str | None = None,
+    error: str | None = None,
+) -> str:
+    """Record the result of an agent-executed step (execution mode 'agent').
+
+    Call once per root step from the plan returned by loop_run(mode='agent').
+    The job transitions ready -> in_progress and auto-completes when all
+    recorded steps cover total_steps. Failed steps keep the run in_progress
+    with an error attached; finalize explicitly via this tool semantics.
+    """
+    job = rt.store.get_job(job_id)
+    if not job:
+        return json.dumps({"error": f"Job '{job_id}' not found."})
+
+    parsed_output: Any = None
+    if output is not None:
+        try:
+            parsed_output = json.loads(output)
+        except (json.JSONDecodeError, TypeError):
+            parsed_output = output
+
+    updated = rt.store.record_step_result(
+        job_id=job_id,
+        step_name=step_name,
+        success=success,
+        output=parsed_output,
+        error=error,
+    )
+    if updated is None:
+        return json.dumps({"error": f"Failed to record step for '{job_id}'."})
+    return json.dumps(
+        with_pending(
+            {
+                "recorded": True,
+                "job_id": job_id,
+                "step_name": step_name,
+                "status": updated.status,
+                "current_step": updated.current_step,
+                "total_steps": updated.total_steps,
+                "error": updated.error,
             }
         ),
         indent=2,
@@ -176,8 +260,11 @@ def loop_run(
     """Execute a loop end-to-end. Returns immediately with job_id; poll loop_status for progress.
 
     Two sources are supported:
-    - spec_json: raw LoopSpec v1 JSON string; runs detached in a worker thread
-      inside this MCP process (no orphan processes; dies with opencode).
+    - spec_json: raw LoopSpec v1 JSON string. mode='detached' (default) runs it
+      in a worker thread inside this MCP process (no orphan processes; dies
+      with opencode). mode='agent' only creates a ready job and returns the
+      step plan: the calling agent executes steps itself and records progress
+      via loop_record.
     - loop_name: a Python DSL loop discovered in the workspace (legacy path).
     """
     if spec_json is not None:
