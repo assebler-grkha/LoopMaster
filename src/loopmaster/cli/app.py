@@ -9,6 +9,8 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from loopmaster.cli.json_loop import load_json_loop, print_json_plan
+
 app = typer.Typer(
     name="loop-engine",
     help="LoopMaster — Design, validate, and run AI agent loops.",
@@ -60,66 +62,105 @@ def {func_name}(ctx):
     console.print(f"[green]Created:[/green] {loop_file}")
 
 
-def _walk_spec_nodes(nodes: list, depth: int) -> None:
-    from loopmaster.core.types import Conditional, Parallel
+def _load_python_loop(loop_file: str):
+    """Import a Python loop module and return its first @Loop definition."""
+    import importlib.util
 
-    pad = "  " * depth
-    for node in nodes:
-        if isinstance(node, Parallel):
-            console.print(f"{pad}• parallel ({len(node.steps)} steps)")
-            _walk_spec_nodes(node.steps, depth + 1)
-        elif isinstance(node, Conditional):
-            cond = node.condition if isinstance(node.condition, str) else "<expr>"
-            console.print(f"{pad}• conditional [{cond}]")
-            console.print(f"{pad}  then:")
-            _walk_spec_nodes(node.then_steps, depth + 2)
-            if node.else_steps:
-                console.print(f"{pad}  else:")
-                _walk_spec_nodes(node.else_steps, depth + 2)
-        else:
-            detail = node.model or node.tool or ""
-            line = f"{pad}• {node.name}"
-            if detail:
-                line += f" [{detail}]"
-            console.print(line)
+    module_spec = importlib.util.spec_from_file_location("_loop_module", loop_file)
+    if module_spec is None or module_spec.loader is None:
+        console.print(f"[red]Error:[/red] Cannot load {loop_file}")
+        raise typer.Exit(1)
+
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    from loopmaster.core.types import LoopDef
+
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if isinstance(attr, LoopDef):
+            return attr
+        if hasattr(attr, "_loop_def"):
+            return attr._loop_def
+
+    console.print(f"[red]Error:[/red] No @Loop found in {loop_file}")
+    raise typer.Exit(1)
 
 
-def _print_json_plan(loop_def, spec) -> None:
-    console.print(f"[green]Valid:[/green] {spec.name} v{spec.version} ({spec.execution})")
-    if spec.description:
-        console.print(f"  {spec.description}")
-    if spec.budget:
-        b = spec.budget
-        parts = [
-            f"max_cost=${b.max_cost}" if b.max_cost else None,
-            f"max_tokens={b.max_tokens}" if b.max_tokens else None,
-            f"max_steps={b.max_steps}" if b.max_steps else None,
-        ]
-        console.print("  budget: " + ", ".join(p for p in parts if p))
-    ep = spec.error_policy
-    if ep is not None:
-        fallback = f", fallback={ep.fallback_model}" if ep.fallback_model else ""
+def _print_run_result(result) -> None:
+    if result.success:
+        console.print("[green]Loop completed successfully[/green]")
+        console.print(f"  Cost: ${result.total_cost:.4f}")
+        console.print(f"  Tokens: {result.total_tokens}")
+        console.print(f"  Steps: {', '.join(result.steps_executed)}")
+        return
+    console.print(f"[red]Loop failed:[/red] {result.error}")
+    if result.checkpoint_saved:
+        console.print("[yellow]Checkpoint saved — use --resume to continue[/yellow]")
+    raise typer.Exit(1)
+
+
+def _run_with_progress(engine, loop_def, context: dict, resume_checkpoint=None):
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Executing loop...", total=None)
+        result = engine.run(loop_def, context, resume_checkpoint=resume_checkpoint)
+        progress.update(task, completed=True, description="Done")
+    return result
+
+
+def _load_checkpoint(loop_name: str):
+    from loopmaster.checkpoint import CheckpointManager
+
+    checkpoint = CheckpointManager().load_latest(loop_name)
+    if checkpoint:
         console.print(
-            f"  error_policy: retry={ep.retry}, on_failure={ep.on_failure.value}{fallback}"
+            f"[cyan]Resuming from checkpoint:[/cyan] steps {checkpoint.executed_step_names}"
         )
-    console.print("[cyan]Steps:[/cyan]")
-    _walk_spec_nodes(spec.steps, 1)
-    console.print(f"[dim]source_hash: {loop_def.source_hash[:16]}…[/dim]")
+    else:
+        console.print("[yellow]No checkpoint found, starting fresh[/yellow]")
+    return checkpoint
 
 
-def _load_json_loop(loop_file: str):
-    import json as json_mod
+def _run_json_file(loop_file: str, dry_run: bool) -> None:
+    from loopmaster.core.engine import LoopEngine
 
-    from loopmaster.spec.loader import load_loop_from_json_file
+    loop_def, spec = load_json_loop(loop_file)
+    if dry_run:
+        print_json_plan(loop_def, spec)
+        return
+    engine = LoopEngine()
+    engine.register(loop_def)
+    console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
+    result = _run_with_progress(engine, loop_def, dict(spec.initial_context))
+    _print_run_result(result)
 
-    try:
-        return load_loop_from_json_file(loop_file)
-    except FileNotFoundError:
-        console.print(f"[red]Error:[/red] Cannot read {loop_file}")
-        raise typer.Exit(1) from None
-    except json_mod.JSONDecodeError as e:
-        console.print(f"[red]Error:[/red] invalid JSON in {loop_file}: {e}")
-        raise typer.Exit(1) from None
+
+def _run_python_file(loop_file: str, resume: bool, dry_run: bool) -> None:
+    from loopmaster.core.engine import LoopEngine
+
+    loop_def = _load_python_loop(loop_file)
+    engine = LoopEngine()
+    engine.register(loop_def)
+
+    if dry_run:
+        console.print(f"[cyan]Dry run:[/cyan] {loop_def.name} v{loop_def.version}")
+        console.print("[cyan]No LLM calls will be made[/cyan]")
+        result = engine.run(loop_def, {})
+        if result.success:
+            console.print("[green]Validation passed[/green]")
+        else:
+            console.print(f"[red]Validation failed:[/red] {result.error}")
+            raise typer.Exit(1)
+        return
+
+    checkpoint = _load_checkpoint(loop_def.name) if resume else None
+    console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
+    result = _run_with_progress(engine, loop_def, {}, resume_checkpoint=checkpoint)
+    _print_run_result(result)
 
 
 @app.command()
@@ -128,42 +169,17 @@ def validate(
 ) -> None:
     """Validate a loop file without running it."""
     from loopmaster.core.engine import LoopEngine
-    from loopmaster.core.types import LoopDef
-
-    engine = LoopEngine()
 
     try:
         if loop_file.lower().endswith(".json"):
-            loop_def, spec = _load_json_loop(loop_file)
-            _print_json_plan(loop_def, spec)
+            loop_def, spec = load_json_loop(loop_file)
+            print_json_plan(loop_def, spec)
             return
 
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("_loop_module", loop_file)
-        if spec is None or spec.loader is None:
-            console.print(f"[red]Error:[/red] Cannot load {loop_file}")
-            raise typer.Exit(1)
-
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        found = False
-        for attr_name in dir(module):
-            attr = getattr(module, attr_name)
-            if isinstance(attr, LoopDef):
-                engine.register(attr)
-                console.print(f"[green]Valid:[/green] {attr.name} v{attr.version}")
-                found = True
-            elif hasattr(attr, "_loop_def"):
-                loop_def = attr._loop_def
-                engine.register(loop_def)
-                console.print(f"[green]Valid:[/green] {loop_def.name} v{loop_def.version}")
-                found = True
-
-        if not found:
-            console.print("[yellow]Warning:[/yellow] No @Loop found in file")
-            raise typer.Exit(1)
+        loop_def = _load_python_loop(loop_file)
+        engine = LoopEngine()
+        engine.register(loop_def)
+        console.print(f"[green]Valid:[/green] {loop_def.name} v{loop_def.version}")
 
     except SystemExit:
         raise
@@ -179,112 +195,11 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", "-d", help="Validate without LLM calls"),
 ) -> None:
     """Execute a loop."""
-    from loopmaster.core.engine import LoopEngine
-
-    engine = LoopEngine()
-
     try:
         if loop_file.lower().endswith(".json"):
-            loop_def, spec = _load_json_loop(loop_file)
-            if dry_run:
-                _print_json_plan(loop_def, spec)
-                return
-            engine.register(loop_def)
-            console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Executing loop...", total=None)
-                result = engine.run(loop_def, dict(spec.initial_context))
-                progress.update(task, completed=True, description="Done")
-            if result.success:
-                console.print("[green]Loop completed successfully[/green]")
-                console.print(f"  Cost: ${result.total_cost:.4f}")
-                console.print(f"  Tokens: {result.total_tokens}")
-                console.print(f"  Steps: {', '.join(result.steps_executed)}")
-            else:
-                console.print(f"[red]Loop failed:[/red] {result.error}")
-                if result.checkpoint_saved:
-                    console.print("[yellow]Checkpoint saved — use --resume to continue[/yellow]")
-                raise typer.Exit(1)
-            return
-
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("_loop_module", loop_file)
-        if spec is None or spec.loader is None:
-            console.print(f"[red]Error:[/red] Cannot load {loop_file}")
-            raise typer.Exit(1)
-
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        from loopmaster.core.types import LoopDef as LoopDefType
-
-        loop_def = None
-        for attr_name in dir(module):
-            attr = getattr(module, attr_name)
-            if isinstance(attr, LoopDefType):
-                loop_def = attr
-                break
-            elif hasattr(attr, "_loop_def"):
-                loop_def = attr._loop_def
-                break
-
-        if loop_def is None:
-            console.print("[red]Error:[/red] No @Loop found")
-            raise typer.Exit(1)
-
-        engine.register(loop_def)
-
-        if dry_run:
-            console.print(f"[cyan]Dry run:[/cyan] {loop_def.name} v{loop_def.version}")
-            console.print("[cyan]No LLM calls will be made[/cyan]")
-            result = engine.run(loop_def, {})
-            if result.success:
-                console.print("[green]Validation passed[/green]")
-            else:
-                console.print(f"[red]Validation failed:[/red] {result.error}")
-                raise typer.Exit(1)
+            _run_json_file(loop_file, dry_run=dry_run)
         else:
-            checkpoint = None
-            if resume:
-                from loopmaster.checkpoint import CheckpointManager
-
-                mgr = CheckpointManager()
-                checkpoint = mgr.load_latest(loop_def.name)
-                if checkpoint:
-                    console.print(
-                        f"[cyan]Resuming from checkpoint:[/cyan] "
-                        f"steps {checkpoint.executed_step_names}"
-                    )
-                else:
-                    console.print("[yellow]No checkpoint found, starting fresh[/yellow]")
-
-            console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Executing loop...", total=None)
-                result = engine.run(loop_def, {}, resume_checkpoint=checkpoint)
-                progress.update(task, completed=True, description="Done")
-
-            if result.success:
-                console.print("[green]Loop completed successfully[/green]")
-                console.print(f"  Cost: ${result.total_cost:.4f}")
-                console.print(f"  Tokens: {result.total_tokens}")
-                console.print(f"  Steps: {', '.join(result.steps_executed)}")
-            else:
-                console.print(f"[red]Loop failed:[/red] {result.error}")
-                if result.checkpoint_saved:
-                    console.print("[yellow]Checkpoint saved — use --resume to continue[/yellow]")
-                raise typer.Exit(1)
-
+            _run_python_file(loop_file, resume=resume, dry_run=dry_run)
     except SystemExit:
         raise
     except Exception as e:
@@ -342,39 +257,13 @@ def export(
     output: str | None = typer.Option(None, "-o", "--output", help="Output YAML file path"),
 ) -> None:
     """Export a loop definition as YAML."""
-    from loopmaster.core.types import LoopDef as LoopDefType
     from loopmaster.core.yaml_export import export_loop
 
     try:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("_loop_module", loop_file)
-        if spec is None or spec.loader is None:
-            console.print(f"[red]Error:[/red] Cannot load {loop_file}")
-            raise typer.Exit(1)
-
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        loop_def = None
-        for attr_name in dir(module):
-            attr = getattr(module, attr_name)
-            if isinstance(attr, LoopDefType):
-                loop_def = attr
-                break
-            elif hasattr(attr, "_loop_def"):
-                loop_def = attr._loop_def
-                break
-
-        if loop_def is None:
-            console.print("[red]Error:[/red] No @Loop found in file")
-            raise typer.Exit(1)
-
+        loop_def = _load_python_loop(loop_file)
         yaml_str = export_loop(loop_def)
 
         if output:
-            from pathlib import Path
-
             Path(output).write_text(yaml_str, encoding="utf-8")
             console.print(f"[green]Exported:[/green] {output}")
         else:
@@ -392,8 +281,6 @@ def docs(
     open_browser: bool = typer.Option(True, help="Open docs in browser"),
 ) -> None:
     """Open or generate project documentation."""
-    from pathlib import Path
-
     docs_dir = Path(__file__).resolve().parent.parent.parent.parent / "docs"
 
     if not docs_dir.exists():
@@ -420,20 +307,24 @@ def docs(
     console.print(f"\nDocs directory: [cyan]{docs_dir}[/cyan]")
 
     if open_browser:
-        import os
-        import platform
-        import subprocess
+        _open_in_browser(docs_dir)
 
-        try:
-            if platform.system() == "Windows":
-                os.startfile(str(docs_dir))  # type: ignore[attr-defined]
-            elif platform.system() == "Darwin":
-                subprocess.run(["open", str(docs_dir)], check=False)  # noqa: S603
-            else:
-                subprocess.run(["xdg-open", str(docs_dir)], check=False)  # noqa: S603
-            console.print("[green]Opened docs directory[/green]")
-        except Exception:
-            console.print("[yellow]Could not open browser automatically[/yellow]")
+
+def _open_in_browser(docs_dir: Path) -> None:
+    import os
+    import platform
+    import subprocess
+
+    try:
+        if platform.system() == "Windows":
+            os.startfile(str(docs_dir))  # type: ignore[attr-defined]
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", str(docs_dir)], check=False)  # noqa: S603
+        else:
+            subprocess.run(["xdg-open", str(docs_dir)], check=False)  # noqa: S603
+        console.print("[green]Opened docs directory[/green]")
+    except Exception:
+        console.print("[yellow]Could not open browser automatically[/yellow]")
 
 
 def main() -> None:

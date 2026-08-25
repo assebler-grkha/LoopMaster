@@ -1,208 +1,114 @@
-"""SQLite JobStore — persistent, thread-safe storage for MCP loop jobs."""
+"""SQLite JobStore — persistent, thread-safe storage for MCP loop jobs.
+
+Composition root: schema/ownership lives here, table CRUD is split into
+mixins (job_ops, loop_store, code_store, message_store) and shared models
+into store_models. This module re-exports the public surface so existing
+``from loopmaster.mcp.job_store import ...`` imports keep working.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
-import logging
 import os
-import re
 import sqlite3
-import sys
 import threading
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("loopmaster.mcp.job_store")
+from loopmaster.mcp.code_store import CodeBlockStoreMixin
+from loopmaster.mcp.job_ops import JobOpsMixin
+from loopmaster.mcp.loop_store import LoopStoreMixin
+from loopmaster.mcp.message_store import MessageStoreMixin
+from loopmaster.mcp.store_models import (  # noqa: F401  (re-exports)
+    ACTIVE_STATUSES,
+    BLOCK_LANGUAGES,
+    MESSAGE_STATUSES,
+    SCHEMA_VERSION,
+    TERMINAL_STATUSES,
+    CodeBlockData,
+    JobData,
+    LoopData,
+    MessageData,
+    _split_block_ref,
+    is_pid_alive,
+    parse_duration,
+)
 
-SCHEMA_VERSION = 3
-TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
-ACTIVE_STATUSES = frozenset({"ready", "running", "in_progress", "waiting_input"})
-BLOCK_LANGUAGES = frozenset({"python", "shell"})
-_CAPABILITY_RE = re.compile(r"^net$|^fs:(read|write):.+$")
-_CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
-_CODE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-_POISON_REF_RE = re.compile(r"\{[a-zA-Z_]\w*\}")
-_DURATION_RE = re.compile(r"(\d+)([smhd])")
-_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-MESSAGE_STATUSES = frozenset({"pending", "answered", "expired", "cancelled"})
+__all__ = [
+    "ACTIVE_STATUSES",
+    "BLOCK_LANGUAGES",
+    "CodeBlockData",
+    "JobData",
+    "JobStore",
+    "LoopData",
+    "MESSAGE_STATUSES",
+    "MessageData",
+    "SCHEMA_VERSION",
+    "TERMINAL_STATUSES",
+    "_split_block_ref",
+    "get_job_store",
+    "is_pid_alive",
+    "parse_duration",
+]
 
-
-def _split_block_ref(ref: str) -> tuple[str, str | None]:
-    """Split a 'name@X.Y.Z' ref into (name, version); plain name -> version None."""
-    if isinstance(ref, str) and _CODE_REF_RE.match(ref):
-        name, _, version = ref.partition("@")
-        return name, version
-    return ref, None
-
-
-def parse_duration(text: str) -> float:
-    """Parse a compound duration string like '1h30m' into seconds."""
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("duration must be a non-empty string like '30s', '24h' or '1h30m'")
-    matches = list(_DURATION_RE.finditer(text))
-    if not matches:
-        raise ValueError(f"invalid duration {text!r}: expected chunks like 10s/5m/2h/1d")
-    covered = sum(len(m.group(0)) for m in matches)
-    if covered != len(text.replace(" ", "")):
-        raise ValueError(f"invalid duration {text!r}: unexpected characters")
-    total = 0.0
-    seen_units: set[str] = set()
-    for m in matches:
-        unit = m.group(2)
-        if unit in seen_units:
-            raise ValueError(f"invalid duration {text!r}: repeated unit {unit!r}")
-        seen_units.add(unit)
-        total += int(m.group(1)) * _DURATION_UNITS[unit]
-    return float(total)
-
-
-def is_pid_alive(pid: int | None) -> bool:
-    """Check whether a process ID belongs to a live process."""
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if sys.platform == "win32":
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-@dataclass
-class JobData:
-    """Represents a persistent loop execution job."""
-
-    job_id: str
-    loop_name: str
-    status: str = "ready"  # ready, running, in_progress, completed, error, failed, cancelled
-    current_step: int = 0
-    total_steps: int = 0
-    definition: dict[str, Any] = field(default_factory=dict)
-    results: dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-    completed_at: float | None = None
-    error: str | None = None
-    metrics: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
-        return {
-            "job_id": self.job_id,
-            "loop_name": self.loop_name,
-            "status": self.status,
-            "current_step": self.current_step,
-            "total_steps": self.total_steps,
-            "definition": self.definition,
-            "results": self.results,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "completed_at": self.completed_at,
-            "error": self.error,
-            "metrics": self.metrics,
-        }
+SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    loop_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_step INTEGER NOT NULL DEFAULT 0,
+    total_steps INTEGER NOT NULL DEFAULT 0,
+    definition TEXT NOT NULL,
+    results TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    completed_at REAL,
+    error TEXT,
+    metrics TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_loop_name ON jobs(loop_name);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+CREATE TABLE IF NOT EXISTS loops (
+    name TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    source_hash TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS code_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    language TEXT NOT NULL,
+    entrypoint TEXT NOT NULL DEFAULT 'main',
+    source TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    description TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(name, version)
+);
+CREATE INDEX IF NOT EXISTS idx_code_blocks_name ON code_blocks(name);
+CREATE TABLE IF NOT EXISTS messages (
+    msg_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    from_addr TEXT NOT NULL,
+    to_addr TEXT NOT NULL,
+    type TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    reply_to TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL,
+    expires_at REAL,
+    answered_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id);
+CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(to_addr, status);
+"""
 
 
-@dataclass
-class LoopData:
-    """Represents a persisted JSON loop spec (LoopStore)."""
-
-    name: str
-    version: str
-    spec: dict[str, Any] = field(default_factory=dict)
-    source_hash: str = ""
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
-        return {
-            "name": self.name,
-            "version": self.version,
-            "spec": self.spec,
-            "source_hash": self.source_hash,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
-
-
-@dataclass
-class CodeBlockData:
-    """Represents an immutable code block (name, version) with pinned sha256."""
-
-    name: str
-    version: str
-    language: str
-    source: str
-    sha256: str = ""
-    entrypoint: str = "main"
-    capabilities: list[str] = field(default_factory=list)
-    description: str = ""
-    created_at: float = field(default_factory=time.time)
-
-    def to_dict(self, include_source: bool = True) -> dict[str, Any]:
-        """Convert to JSON-serializable dictionary (source optional)."""
-        data: dict[str, Any] = {
-            "name": self.name,
-            "version": self.version,
-            "language": self.language,
-            "entrypoint": self.entrypoint,
-            "sha256": self.sha256,
-            "capabilities": list(self.capabilities),
-            "description": self.description,
-            "created_at": self.created_at,
-        }
-        if include_source:
-            data["source"] = self.source
-        return data
-
-
-@dataclass
-class MessageData:
-    """A HITL protocol message (question/answer) routed between loop and agent."""
-
-    msg_id: str
-    job_id: str
-    from_addr: str
-    to_addr: str
-    type: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    status: str = "pending"
-    created_at: float = field(default_factory=time.time)
-    expires_at: float | None = None
-    answered: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
-        return {
-            "msg_id": self.msg_id,
-            "job_id": self.job_id,
-            "from_addr": self.from_addr,
-            "to_addr": self.to_addr,
-            "type": self.type,
-            "payload": self.payload,
-            "status": self.status,
-            "created_at": self.created_at,
-            "expires_at": self.expires_at,
-            "answered": self.answered,
-        }
-
-
-class JobStore:
+class JobStore(CodeBlockStoreMixin, JobOpsMixin, LoopStoreMixin, MessageStoreMixin):
     """Persistent SQLite job store with thread-safety and WAL concurrency."""
 
     def __init__(self, db_path: str | Path = ".loopmaster/jobs.db") -> None:
@@ -229,726 +135,17 @@ class JobStore:
         return self._conn
 
     def _init_schema(self) -> None:
-        """Initialize jobs table and indexes (gated by PRAGMA user_version)."""
+        """Initialize tables and indexes (gated by PRAGMA user_version)."""
         with self._lock:
             cur = self.conn.cursor()
             cur.execute("PRAGMA user_version;")
             if int(cur.fetchone()[0]) >= SCHEMA_VERSION:
                 cur.close()
                 return
-            cur.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    job_id TEXT PRIMARY KEY,
-                    loop_name TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    current_step INTEGER NOT NULL DEFAULT 0,
-                    total_steps INTEGER NOT NULL DEFAULT 0,
-                    definition TEXT NOT NULL,
-                    results TEXT NOT NULL DEFAULT '{}',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    completed_at REAL,
-                    error TEXT,
-                    metrics TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_jobs_loop_name ON jobs(loop_name);
-                CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-                CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
-                CREATE TABLE IF NOT EXISTS loops (
-                    name TEXT PRIMARY KEY,
-                    version TEXT NOT NULL,
-                    spec_json TEXT NOT NULL,
-                    source_hash TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS code_blocks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    language TEXT NOT NULL,
-                    entrypoint TEXT NOT NULL DEFAULT 'main',
-                    source TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    capabilities_json TEXT NOT NULL DEFAULT '[]',
-                    description TEXT,
-                    created_at REAL NOT NULL,
-                    UNIQUE(name, version)
-                );
-                CREATE INDEX IF NOT EXISTS idx_code_blocks_name ON code_blocks(name);
-                CREATE TABLE IF NOT EXISTS messages (
-                    msg_id TEXT PRIMARY KEY,
-                    job_id TEXT NOT NULL,
-                    from_addr TEXT NOT NULL,
-                    to_addr TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    reply_to TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at REAL NOT NULL,
-                    expires_at REAL,
-                    answered_json TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id);
-                CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(to_addr, status);
-                """
-            )
+            cur.executescript(SCHEMA_DDL)
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             self.conn.commit()
             cur.close()
-
-    def save_loop(
-        self, name: str, version: str, spec: dict[str, Any], source_hash: str = ""
-    ) -> LoopData:
-        """Insert or replace a loop spec (upsert by name)."""
-        now = time.time()
-        existing = self.get_loop(name)
-        created_at = existing.created_at if existing else now
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO loops (name, version, spec_json, source_hash, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    version = excluded.version,
-                    spec_json = excluded.spec_json,
-                    source_hash = excluded.source_hash,
-                    updated_at = excluded.updated_at
-                """,
-                (name, version, json.dumps(spec, default=str), source_hash, created_at, now),
-            )
-            self.conn.commit()
-            cur.close()
-        return LoopData(
-            name=name,
-            version=version,
-            spec=spec,
-            source_hash=source_hash,
-            created_at=created_at,
-            updated_at=now,
-        )
-
-    def get_loop(self, name: str) -> LoopData | None:
-        """Fetch a loop spec by name, or None."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM loops WHERE name = ?", (name,))
-            row = cur.fetchone()
-            cur.close()
-        return _row_to_loop(row) if row else None
-
-    def list_loops(self, limit: int = 100) -> list[LoopData]:
-        """List persisted loops, newest first."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                "SELECT * FROM loops ORDER BY updated_at DESC LIMIT ?",
-                (int(limit),),
-            )
-            rows = cur.fetchall()
-            cur.close()
-        return [_row_to_loop(r) for r in rows]
-
-    def delete_loop(self, name: str) -> bool:
-        """Delete a loop spec. Returns True when a row was removed."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute("DELETE FROM loops WHERE name = ?", (name,))
-            deleted = cur.rowcount > 0
-            self.conn.commit()
-            cur.close()
-        return deleted
-
-    def save_code_block(
-        self,
-        name: str,
-        version: str,
-        language: str,
-        source: str,
-        capabilities: list[str] | None = None,
-        description: str = "",
-        entrypoint: str = "main",
-    ) -> CodeBlockData:
-        """Register an immutable code block. Re-registering the same
-        (name, version) raises ValueError — publish a new version instead."""
-        if not isinstance(name, str) or not _CODE_NAME_RE.match(name):
-            raise ValueError(f"invalid code block name {name!r} (expected kebab-case)")
-        if not isinstance(version, str) or not _SEMVER_RE.match(version):
-            raise ValueError(f"invalid version {version!r} (expected semantic X.Y.Z)")
-        if language not in BLOCK_LANGUAGES:
-            raise ValueError(
-                f"unsupported language {language!r} (expected one of {sorted(BLOCK_LANGUAGES)})"
-            )
-        if not isinstance(source, str) or not source.strip():
-            raise ValueError("source must be a non-empty string")
-        caps = [str(c) for c in (capabilities or [])]
-        for cap in caps:
-            if not _CAPABILITY_RE.match(cap):
-                raise ValueError(
-                    f"invalid capability {cap!r} "
-                    "(expected 'net', 'fs:read:<prefix>' or 'fs:write:<prefix>')"
-                )
-        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        with self._lock:
-            cur = self.conn.cursor()
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO code_blocks (
-                        name, version, language, entrypoint, source, sha256,
-                        capabilities_json, description, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        name,
-                        version,
-                        language,
-                        entrypoint or "main",
-                        source,
-                        digest,
-                        json.dumps(caps),
-                        description,
-                        time.time(),
-                    ),
-                )
-                self.conn.commit()
-            except sqlite3.IntegrityError as exc:
-                raise ValueError(
-                    f"code block '{name}@{version}' already exists — register a new version instead"
-                ) from exc
-            finally:
-                cur.close()
-        return CodeBlockData(
-            name=name,
-            version=version,
-            language=language,
-            source=source,
-            sha256=digest,
-            entrypoint=entrypoint or "main",
-            capabilities=caps,
-            description=description,
-        )
-
-    def get_code_block(self, ref: str, version: str | None = None) -> CodeBlockData | None:
-        """Fetch a code block by 'name@X.Y.Z' ref, or by name + version."""
-        name, ref_version = _split_block_ref(ref)
-        resolved_version = version or ref_version
-        with self._lock:
-            cur = self.conn.cursor()
-            if resolved_version is None:
-                cur.execute(
-                    "SELECT * FROM code_blocks WHERE name = ? ORDER BY id DESC LIMIT 1",
-                    (name,),
-                )
-            else:
-                cur.execute(
-                    "SELECT * FROM code_blocks WHERE name = ? AND version = ?",
-                    (name, resolved_version),
-                )
-            row = cur.fetchone()
-            cur.close()
-        return _row_to_code_block(row) if row else None
-
-    def list_code_blocks(
-        self, pattern: str | None = None, limit: int = 100, include_source: bool = False
-    ) -> list[CodeBlockData]:
-        """List code blocks (newest first), optionally filtered by name substring."""
-        with self._lock:
-            cur = self.conn.cursor()
-            if pattern:
-                cur.execute(
-                    "SELECT * FROM code_blocks WHERE name LIKE ? ORDER BY created_at DESC LIMIT ?",
-                    (f"%{pattern}%", int(limit)),
-                )
-            else:
-                cur.execute(
-                    "SELECT * FROM code_blocks ORDER BY created_at DESC LIMIT ?",
-                    (int(limit),),
-                )
-            rows = cur.fetchall()
-            cur.close()
-        blocks = []
-        for r in rows:
-            block = _row_to_code_block(r)
-            if not include_source:
-                block.source = ""
-            blocks.append(block)
-        return blocks
-
-    def delete_code_block(self, name: str, version: str) -> bool:
-        """Delete a specific code block version. Returns True when removed."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute("DELETE FROM code_blocks WHERE name = ? AND version = ?", (name, version))
-            deleted = cur.rowcount > 0
-            self.conn.commit()
-            cur.close()
-        return deleted
-
-    def verify_code_block(self, ref: str, version: str | None = None) -> bool:
-        """Recompute the sha256 of the stored source and compare with the pin."""
-        block = self.get_code_block(ref, version)
-        if block is None:
-            return False
-        return hashlib.sha256(block.source.encode("utf-8")).hexdigest() == block.sha256
-
-    @staticmethod
-    def _guard_poison_refs(texts: list[str]) -> None:
-        """Reject template-like placeholders that SKIP would leave as literals."""
-        for text in texts:
-            if text and _POISON_REF_RE.search(text):
-                raise ValueError(
-                    f"placeholder {text!r} is not allowed here: "
-                    "on timeout it would stay a literal — pass plain text or use default_answer"
-                )
-
-    def create_question(
-        self,
-        job_id: str,
-        from_addr: str,
-        text: str,
-        options: list[str] | None = None,
-        timeout_s: float | None = None,
-        default_answer: Any = None,
-        to_addr: str = "agent",
-    ) -> MessageData:
-        """Register a HITL question (idempotent per job_id+from_addr)."""
-        poison_candidates = [text]
-        if default_answer is not None:
-            poison_candidates.append(str(default_answer))
-        self._guard_poison_refs(poison_candidates)
-        for opt in options or []:
-            self._guard_poison_refs([str(opt)])
-        msg_id = hashlib.sha256(f"{job_id}|{from_addr}".encode()).hexdigest()
-        now = time.time()
-        expires_at = (now + timeout_s) if timeout_s else None
-        payload = {"text": str(text), "options": list(options or [])}
-        if default_answer is not None:
-            payload["default_answer"] = default_answer
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO messages (
-                    msg_id, job_id, from_addr, to_addr, type,
-                    payload_json, status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, 'question', ?, 'pending', ?, ?)
-                ON CONFLICT(msg_id) DO NOTHING
-                """,
-                (
-                    msg_id,
-                    job_id,
-                    from_addr,
-                    to_addr,
-                    json.dumps(payload, ensure_ascii=False),
-                    now,
-                    expires_at,
-                ),
-            )
-            self.conn.commit()
-            cur.close()
-        message = self.get_message(msg_id)
-        assert message is not None
-        return message
-
-    def answer_question(self, msg_id: str, answer: Any, by: str = "agent") -> MessageData:
-        """Answer a pending question; raises ValueError on already-answered/expired."""
-        answered = {"answer": answer, "by": by}
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE messages SET status = 'answered', answered_json = ? "
-                "WHERE msg_id = ? AND status = 'pending'",
-                (json.dumps(answered, ensure_ascii=False), msg_id),
-            )
-            updated = cur.rowcount > 0
-            self.conn.commit()
-            cur.close()
-        message = self.get_message(msg_id)
-        if message is None:
-            raise KeyError(f"message '{msg_id}' not found")
-        if not updated:
-            raise ValueError(
-                f"already_{message.status}"
-                if message.status != "pending"
-                else f"message '{msg_id}' is still pending"
-            )
-        return message
-
-    def get_message(self, msg_id: str) -> MessageData | None:
-        """Fetch a single message by id."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM messages WHERE msg_id = ?", (msg_id,))
-            row = cur.fetchone()
-            cur.close()
-        return _row_to_message(row) if row is not None else None
-
-    def sweep_expired_questions(self, now: float | None = None) -> int:
-        """Mark expired pending questions; returns how many were swept."""
-        moment = time.time() if now is None else now
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE messages SET status = 'expired' "
-                "WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
-                (moment,),
-            )
-            swept = cur.rowcount
-            self.conn.commit()
-            cur.close()
-            return swept
-
-    def list_questions(
-        self,
-        job_id: str | None = None,
-        status: str = "pending",
-    ) -> list[MessageData]:
-        """List messages of type question (pending by default), oldest first."""
-        if status not in MESSAGE_STATUSES:
-            raise ValueError(f"invalid message status {status!r}")
-        query = "SELECT * FROM messages WHERE type = 'question' AND status = ?"
-        params: list[Any] = [status]
-        if job_id is not None:
-            query += " AND job_id = ?"
-            params.append(job_id)
-        query += " ORDER BY created_at ASC LIMIT 200"
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(query, params)
-            rows = cur.fetchall()
-            cur.close()
-        return [_row_to_message(row) for row in rows]
-
-    def cancel_pending_messages(self, job_id: str) -> int:
-        """Cancel all pending messages of a job."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE messages SET status = 'cancelled' WHERE job_id = ? AND status = 'pending'",
-                (job_id,),
-            )
-            cancelled = cur.rowcount
-            self.conn.commit()
-            cur.close()
-            return cancelled
-
-    def create_job(
-        self,
-        job_id: str,
-        loop_name: str,
-        definition: dict[str, Any],
-        status: str = "ready",
-        total_steps: int | None = None,
-        metrics: dict[str, Any] | None = None,
-    ) -> JobData:
-        """Create a new persistent job (upsert: resets an existing row)."""
-        now = time.time()
-        steps_count = (
-            total_steps
-            if total_steps is not None
-            else definition.get("step_count", len(definition.get("steps", [])))
-        )
-        metrics = metrics or {}
-        job = JobData(
-            job_id=job_id,
-            loop_name=loop_name,
-            status=status,
-            current_step=0,
-            total_steps=steps_count,
-            definition=definition,
-            results={},
-            created_at=now,
-            updated_at=now,
-            metrics=metrics,
-        )
-
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO jobs (
-                    job_id, loop_name, status, current_step, total_steps,
-                    definition, results, created_at, updated_at,
-                    completed_at, error, metrics
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
-                ON CONFLICT(job_id) DO UPDATE SET
-                    loop_name = excluded.loop_name,
-                    status = excluded.status,
-                    current_step = 0,
-                    total_steps = excluded.total_steps,
-                    definition = excluded.definition,
-                    results = '{}',
-                    updated_at = excluded.updated_at,
-                    completed_at = NULL,
-                    error = NULL,
-                    metrics = excluded.metrics
-                """,
-                (
-                    job.job_id,
-                    job.loop_name,
-                    job.status,
-                    job.current_step,
-                    job.total_steps,
-                    json.dumps(job.definition, default=str),
-                    json.dumps(job.results, default=str),
-                    job.created_at,
-                    job.updated_at,
-                    json.dumps(metrics, default=str),
-                ),
-            )
-            self.conn.commit()
-            cur.close()
-        return job
-
-    def get_job(self, job_id: str) -> JobData | None:
-        """Retrieve a job by ID."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
-            row = cur.fetchone()
-            cur.close()
-            return self._row_to_job(row) if row else None
-
-    def update_job(
-        self,
-        job_id: str,
-        status: str | None = None,
-        current_step: int | None = None,
-        results: dict[str, Any] | None = None,
-        error: str | None = None,
-        metrics: dict[str, Any] | None = None,
-        completed: bool = False,
-    ) -> JobData | None:
-        """Update job fields."""
-        with self._lock:
-            job = self.get_job(job_id)
-            if not job:
-                return None
-            if job.status in TERMINAL_STATUSES and not (
-                job.status == "completed" and status == "completed"
-            ):
-                logger.debug("Job %s already terminal (%s); update skipped", job_id, job.status)
-                return job
-
-            now = time.time()
-            if status is not None:
-                job.status = status
-            if current_step is not None:
-                job.current_step = current_step
-            if results is not None:
-                job.results = results
-            if error is not None:
-                job.error = error
-            if metrics is not None:
-                job.metrics = metrics
-            if completed:
-                if status is None or status == "completed":
-                    job.status = "completed"
-                job.completed_at = now
-            job.updated_at = now
-
-            cur = self.conn.cursor()
-            cur.execute(
-                """
-                UPDATE jobs SET
-                    status = ?, current_step = ?, total_steps = ?, definition = ?,
-                    results = ?, completed_at = ?, error = ?, metrics = ?, updated_at = ?
-                WHERE job_id = ?
-                """,
-                (
-                    job.status,
-                    job.current_step,
-                    job.total_steps,
-                    json.dumps(job.definition, default=str),
-                    json.dumps(job.results, default=str),
-                    job.completed_at,
-                    job.error,
-                    json.dumps(job.metrics, default=str) if job.metrics else None,
-                    job.updated_at,
-                    job.job_id,
-                ),
-            )
-            self.conn.commit()
-            cur.close()
-            return job
-
-    def record_step_result(
-        self,
-        job_id: str,
-        step_name: str,
-        success: bool,
-        output: Any = None,
-        error: str | None = None,
-        auto_complete: bool = True,
-    ) -> JobData | None:
-        """Record the result of a single step.
-
-        auto_complete marks the job completed once every recorded leaf is in;
-        detached workers pass False because their finalize step owns terminal
-        status (root-vs-leaf counting misreports conditional/parallel trees).
-        """
-        with self._lock:
-            job = self.get_job(job_id)
-            if not job:
-                return None
-            if job.status in TERMINAL_STATUSES:
-                logger.debug(
-                    "Job %s already terminal (%s); step result skipped", job_id, job.status
-                )
-                return job
-
-            now = time.time()
-            job.results[step_name] = {
-                "success": success,
-                "output": output,
-                "error": error,
-                "timestamp": now,
-            }
-            job.current_step = len(job.results)
-            job.updated_at = now
-
-            failed = sum(1 for r in job.results.values() if not r["success"])
-            if failed > 0:
-                job.status = "error"
-                job.error = error or job.error
-            elif auto_complete and job.total_steps > 0 and len(job.results) >= job.total_steps:
-                job.status = "completed"
-                job.completed_at = now
-            else:
-                job.status = "in_progress"
-
-            cur = self.conn.cursor()
-            cur.execute(
-                """
-                UPDATE jobs SET
-                    status = ?, current_step = ?, results = ?,
-                    error = ?, completed_at = ?, updated_at = ?
-                WHERE job_id = ?
-                """,
-                (
-                    job.status,
-                    job.current_step,
-                    json.dumps(job.results, default=str),
-                    job.error,
-                    job.completed_at,
-                    job.updated_at,
-                    job.job_id,
-                ),
-            )
-            self.conn.commit()
-            cur.close()
-            return job
-
-    def list_jobs(
-        self,
-        loop_name: str | None = None,
-        status: str | None = None,
-        limit: int = 50,
-    ) -> list[JobData]:
-        """List jobs with optional filtering."""
-        with self._lock:
-            sql = "SELECT * FROM jobs WHERE 1=1"
-            params: list[Any] = []
-            if loop_name:
-                sql += " AND loop_name = ?"
-                params.append(loop_name)
-            if status:
-                sql += " AND status = ?"
-                params.append(status)
-            sql += " ORDER BY created_at DESC LIMIT ?"
-            params.append(limit)
-
-            cur = self.conn.cursor()
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            cur.close()
-            return [self._row_to_job(r) for r in rows]
-
-    def cancel_job(self, job_id: str) -> bool:
-        """Cancel a running or ready job (and its pending HITL questions)."""
-        with self._lock:
-            job = self.get_job(job_id)
-            if not job or job.status in ("completed", "failed", "cancelled"):
-                return False
-            now = time.time()
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ?",
-                ("cancelled", now, job_id),
-            )
-            cancelled = cur.rowcount > 0
-            cur.execute(
-                "UPDATE messages SET status = 'cancelled' WHERE job_id = ? AND status = 'pending'",
-                (job_id,),
-            )
-            self.conn.commit()
-            cur.close()
-            return cancelled
-
-    def delete_job(self, job_id: str) -> bool:
-        """Delete a job record."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
-            deleted = cur.rowcount > 0
-            self.conn.commit()
-            cur.close()
-            return deleted
-
-    def touch_job(self, job_id: str) -> bool:
-        """Refresh updated_at for a non-terminal, non-waiting job (heartbeat)."""
-        with self._lock:
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE jobs SET updated_at = ? WHERE job_id = ? "
-                "AND status IN ('ready', 'running', 'in_progress')",
-                (time.time(), job_id),
-            )
-            touched = cur.rowcount > 0
-            self.conn.commit()
-            cur.close()
-            return touched
-
-    def _host_pid_alive(self, metrics_json: str | None) -> bool:
-        """Check whether the job's owning host process is still alive."""
-        if not metrics_json:
-            return False
-        try:
-            pid = json.loads(metrics_json).get("host_pid")
-        except (json.JSONDecodeError, AttributeError):
-            return False
-        return is_pid_alive(pid)
-
-    def mark_interrupted_jobs_on_startup(self) -> int:
-        """Mark orphan 'running'/'in_progress' jobs as 'interrupted' on startup.
-
-        Jobs whose recorded host_pid is still alive are skipped: duplicate MCP
-        server instances share this DB and must not kill each other's live jobs.
-        """
-        interrupted = 0
-        with self._lock:
-            now = time.time()
-            cur = self.conn.cursor()
-            cur.execute(
-                "SELECT job_id, metrics FROM jobs "
-                "WHERE status IN ('running', 'in_progress', 'waiting_input')"
-            )
-            rows = cur.fetchall()
-            for row in rows:
-                if self._host_pid_alive(row["metrics"]):
-                    continue
-                cur.execute(
-                    "UPDATE jobs SET status = 'interrupted', updated_at = ? WHERE job_id = ?",
-                    (now, row["job_id"]),
-                )
-                interrupted += cur.rowcount
-            self.conn.commit()
-            cur.close()
-            return interrupted
 
     def close(self) -> None:
         """Close the SQLite connection."""
@@ -962,85 +159,6 @@ class JobStore:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
-
-    def _row_to_job(self, row: sqlite3.Row) -> JobData:
-        """Parse SQLite Row into JobData dataclass."""
-        definition = json.loads(row["definition"]) if row["definition"] else {}
-        results = json.loads(row["results"]) if row["results"] else {}
-        metrics = json.loads(row["metrics"]) if row["metrics"] else None
-        return JobData(
-            job_id=row["job_id"],
-            loop_name=row["loop_name"],
-            status=row["status"],
-            current_step=row["current_step"],
-            total_steps=row["total_steps"],
-            definition=definition,
-            results=results,
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            completed_at=row["completed_at"],
-            error=row["error"],
-            metrics=metrics,
-        )
-
-
-def _row_to_loop(row: sqlite3.Row) -> LoopData:
-    """Parse SQLite Row into LoopData dataclass."""
-    return LoopData(
-        name=row["name"],
-        version=row["version"],
-        spec=json.loads(row["spec_json"]) if row["spec_json"] else {},
-        source_hash=row["source_hash"] or "",
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
-
-
-def _row_to_code_block(row: sqlite3.Row) -> CodeBlockData:
-    """Parse SQLite Row into CodeBlockData dataclass."""
-    try:
-        caps = json.loads(row["capabilities_json"]) if row["capabilities_json"] else []
-    except (json.JSONDecodeError, TypeError):
-        caps = []
-    return CodeBlockData(
-        name=row["name"],
-        version=row["version"],
-        language=row["language"],
-        source=row["source"] or "",
-        sha256=row["sha256"] or "",
-        entrypoint=row["entrypoint"] or "main",
-        capabilities=[str(c) for c in caps],
-        description=row["description"] or "",
-        created_at=row["created_at"],
-    )
-
-
-def _row_to_message(row: sqlite3.Row) -> MessageData:
-    """Parse SQLite Row into MessageData dataclass."""
-    try:
-        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
-    except (json.JSONDecodeError, TypeError):
-        payload = {}
-    answered: dict[str, Any] | None
-    if row["answered_json"]:
-        try:
-            answered = json.loads(row["answered_json"])
-        except (json.JSONDecodeError, TypeError):
-            answered = None
-    else:
-        answered = None
-    return MessageData(
-        msg_id=row["msg_id"],
-        job_id=row["job_id"],
-        from_addr=row["from_addr"],
-        to_addr=row["to_addr"],
-        type=row["type"],
-        payload=payload,
-        status=row["status"],
-        created_at=row["created_at"],
-        expires_at=row["expires_at"],
-        answered=answered,
-    )
 
 
 _global_store: JobStore | None = None

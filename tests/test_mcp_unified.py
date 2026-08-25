@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 from loopmaster.llm import LLMResponse
+from loopmaster.mcp.discovery import find_loop_files as _find_loop_files
+from loopmaster.mcp.discovery import load_loop_def_object as _load_loop_def_object
 from scripts.loopmaster_mcp import (
-    _find_loop_files,
-    _load_loop_def_object,
     loop_get,
     loop_list,
     loop_result,
@@ -66,6 +67,8 @@ class TestMCPUnified:
             duration_ms=120.0,
         )
 
+        import loopmaster.mcp.runtime as rt
+
         with patch("loopmaster.llm.client.LLMClient.complete", return_value=mock_resp):
             output_str = loop_run(
                 loop_name="simple_test",
@@ -74,10 +77,20 @@ class TestMCPUnified:
             )
             output = json.loads(output_str)
 
-            assert output["status"] == "completed"
+            assert output["status"] == "running"
             assert output["loop_name"] == "simple_test"
-            assert output["steps_completed"] == 3
-            assert "greet" in output["results"]
-            assert output["results"]["greet"] == "Mocked LLM Output"
-            assert output["total_tokens"] > 0
-            assert output["total_cost"] >= 0.0
+
+            deadline = time.time() + 10
+            job = None
+            while time.time() < deadline:
+                job = rt.store.get_job(output["job_id"])
+                if job is not None and job.status in ("completed", "failed"):
+                    break
+                time.sleep(0.05)
+
+            assert job is not None
+            assert job.status == "completed"
+            assert job.metrics["total_tokens"] > 0
+            assert job.metrics["total_cost"] >= 0.0
+            assert "greet" in job.results
+            assert job.results["greet"] == "Mocked LLM Output"

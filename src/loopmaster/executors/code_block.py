@@ -150,29 +150,9 @@ class CodeBlockExecutor(BaseExecutor):
             return [sys.executable, str(script)]
         return ["bash", "-e", str(script_dir / block.entrypoint)]
 
-    def execute(self, ctx_data: dict[str, Any]) -> CodeBlockResult:
-        """Extract the block and run it as a subprocess with a JSON handshake."""
-        block, err = self._load_block()
-        if err is not None:
-            return CodeBlockResult(error=err)
-        assert block is not None
-
-        err = self._check_capabilities(list(getattr(block, "capabilities", [])))
-        if err is not None:
-            return CodeBlockResult(error=err)
-
-        payload = {
-            "input": resolve_template_value(self.input, ctx_data),
-            "context": ctx_data,
-        }
-
-        script_dir = self._extract(
-            block.source,
-            hashlib.sha256(block.source.encode("utf-8")).hexdigest(),
-            self._script_name(block.language, getattr(block, "entrypoint", "main")),
-        )
-        cmd = self._command_for(block, script_dir)
-
+    def _run_subprocess(
+        self, cmd: list[str], script_dir: Path, payload: dict[str, Any]
+    ) -> tuple[str, str, int] | CodeBlockResult:
         popen_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             popen_kwargs["preexec_fn"] = os.setsid
@@ -199,12 +179,14 @@ class CodeBlockExecutor(BaseExecutor):
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
             return CodeBlockResult(error=f"code block '{self.ref}' timed out after {self.timeout}s")
+        return stdout or "", stderr or "", proc.returncode or 0
 
+    def _interpret(self, stdout: str, stderr: str, returncode: int) -> CodeBlockResult:
         if len(stdout) > STDOUT_LIMIT:
             return CodeBlockResult(
                 stdout=stdout[:STDOUT_LIMIT],
                 stderr=stderr,
-                returncode=proc.returncode,
+                returncode=returncode,
                 error=(
                     f"code block '{self.ref}' produced {len(stdout)} bytes of stdout "
                     f"(limit {STDOUT_LIMIT})"
@@ -217,29 +199,29 @@ class CodeBlockExecutor(BaseExecutor):
             return CodeBlockResult(
                 stdout=stdout[-STDOUT_LIMIT:],
                 stderr=stderr,
-                returncode=proc.returncode,
+                returncode=returncode,
                 error=f"code block '{self.ref}' returned invalid JSON on stdout: {exc}",
             )
 
         output = reply.get("output")
         logs = [str(item) for item in reply.get("logs", [])]
 
-        if proc.returncode != 0:
+        if returncode != 0:
             tail = (reply.get("error") or stderr.strip() or "non-zero exit")[-2000:]
             return CodeBlockResult(
-                returncode=proc.returncode,
+                returncode=returncode,
                 ok=bool(reply.get("ok")),
                 output=output,
                 logs=logs,
                 stdout=stdout,
                 stderr=stderr,
-                error=f"code block '{self.ref}' failed (exit {proc.returncode}): {tail}",
+                error=f"code block '{self.ref}' failed (exit {returncode}): {tail}",
             )
 
         if not reply.get("ok"):
             reason = str(reply.get("error") or "block reported ok=false")
             return CodeBlockResult(
-                returncode=proc.returncode,
+                returncode=returncode,
                 output=output,
                 logs=logs,
                 stdout=stdout,
@@ -256,6 +238,34 @@ class CodeBlockExecutor(BaseExecutor):
             stderr=stderr,
             success=True,
         )
+
+    def execute(self, ctx_data: dict[str, Any]) -> CodeBlockResult:
+        """Extract the block and run it as a subprocess with a JSON handshake."""
+        block, err = self._load_block()
+        if err is not None:
+            return CodeBlockResult(error=err)
+        assert block is not None
+
+        err = self._check_capabilities(list(getattr(block, "capabilities", [])))
+        if err is not None:
+            return CodeBlockResult(error=err)
+
+        payload = {
+            "input": resolve_template_value(self.input, ctx_data),
+            "context": ctx_data,
+        }
+
+        script_dir = self._extract(
+            block.source,
+            hashlib.sha256(block.source.encode("utf-8")).hexdigest(),
+            self._script_name(block.language, getattr(block, "entrypoint", "main")),
+        )
+        cmd = self._command_for(block, script_dir)
+
+        outcome = self._run_subprocess(cmd, script_dir, payload)
+        if isinstance(outcome, CodeBlockResult):
+            return outcome
+        return self._interpret(outcome[0], outcome[1], outcome[2])
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize executor configuration."""

@@ -34,8 +34,8 @@ def _default_engine_factory(
         config = get_llm_config()
         if config is not None:
             llm_client = LLMClient(config=config)
-    except Exception:
-        logger.debug("LLM config unavailable; detached loop runs without llm client", exc_info=True)
+    except Exception as exc:
+        logger.debug("LLM config unavailable (%s); detached loop runs without llm client", exc)
 
     from loopmaster.cost.tracker import CostTracker
     from loopmaster.metrics.collector import MetricsCollector
@@ -180,8 +180,8 @@ class DetachedRunner:
         while not stop.wait(self._poll_s):
             try:
                 job = self._store.get_job(job_id)
-            except Exception:
-                logger.debug("Watcher read failed for %s", job_id, exc_info=True)
+            except Exception as exc:
+                logger.debug("Watcher read failed for %s (%s)", job_id, exc)
                 continue
             if job is None or job.status in TERMINAL_STATUSES:
                 return
@@ -192,8 +192,8 @@ class DetachedRunner:
             if now >= next_beat:
                 try:
                     self._store.touch_job(job_id)
-                except Exception:
-                    logger.debug("Heartbeat failed for %s", job_id, exc_info=True)
+                except Exception as exc:
+                    logger.debug("Heartbeat failed for %s (%s)", job_id, exc)
                 next_beat = now + self._heartbeat_s
 
     def _run_job(
