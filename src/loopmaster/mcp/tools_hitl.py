@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
 import loopmaster.mcp.runtime as rt
 from loopmaster.mcp.job_store import MessageData
 from loopmaster.mcp.runtime import mcp
+from loopmaster.mcp.tools_notifications import with_pending
 
 
 def _question_view(message: MessageData) -> dict[str, Any]:
@@ -32,7 +34,7 @@ def loop_questions(job_id: str | None = None) -> str:
         questions = [
             _question_view(m) for m in rt.store.list_questions(job_id=job_id if job_id else None)
         ]
-        return json.dumps({"count": len(questions), "questions": questions}, indent=2)
+        return json.dumps(with_pending({"count": len(questions), "questions": questions}), indent=2)
     except Exception as exc:  # noqa: BLE001 - tool boundary returns errors as text
         return f"Error listing questions: {exc}"
 
@@ -43,6 +45,8 @@ def loop_respond(job_id: str, msg_id: str, answer) -> str:
 
     try:
         message = rt.store.answer_question(msg_id, answer, by="agent")
+        with contextlib.suppress(Exception):
+            rt.store.mark_job_notifications_read(message.job_id, event="waiting_input")
     except KeyError:
         return f"Error: Message '{msg_id}' not found."
     except ValueError as exc:
@@ -55,6 +59,13 @@ def loop_respond(job_id: str, msg_id: str, answer) -> str:
             return f"Error: already_cancelled — job '{job_id}' was cancelled."
         return f"Error: {text}"
     return json.dumps(
-        {"responded": True, "msg_id": msg_id, "job_id": message.job_id, "status": "answered"},
+        with_pending(
+            {
+                "responded": True,
+                "msg_id": msg_id,
+                "job_id": message.job_id,
+                "status": "answered",
+            }
+        ),
         indent=2,
     )

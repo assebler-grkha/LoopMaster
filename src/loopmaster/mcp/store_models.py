@@ -12,11 +12,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 ACTIVE_STATUSES = frozenset({"ready", "running", "in_progress", "waiting_input"})
 BLOCK_LANGUAGES = frozenset({"python", "shell"})
 MESSAGE_STATUSES = frozenset({"pending", "answered", "expired", "cancelled"})
+NOTIFICATION_PRIORITIES = frozenset({"info", "needs_input", "critical"})
+NOTIFICATION_RETENTION_S = 7 * 86400
+MESSAGE_RETENTION_S = 30 * 86400
 
 _CAPABILITY_RE = re.compile(r"^net$|^fs:(read|write):.+$")
 _CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
@@ -208,6 +211,33 @@ class MessageData:
         }
 
 
+@dataclass
+class NotificationData:
+    """An outbox notification for the polling agent (never pushes)."""
+
+    notif_id: str
+    priority: str  # info | needs_input | critical
+    event: str
+    summary: str
+    job_id: str = ""
+    detail: dict[str, Any] = field(default_factory=dict)
+    read_by_agent: bool = False
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            "notif_id": self.notif_id,
+            "job_id": self.job_id,
+            "priority": self.priority,
+            "event": self.event,
+            "summary": self.summary,
+            "detail": self.detail,
+            "read_by_agent": self.read_by_agent,
+            "created_at": self.created_at,
+        }
+
+
 def row_to_loop(row: sqlite3.Row) -> LoopData:
     """Parse SQLite Row into LoopData dataclass."""
     return LoopData(
@@ -235,6 +265,24 @@ def row_to_code_block(row: sqlite3.Row) -> CodeBlockData:
         entrypoint=row["entrypoint"] or "main",
         capabilities=[str(c) for c in caps],
         description=row["description"] or "",
+        created_at=row["created_at"],
+    )
+
+
+def row_to_notification(row: sqlite3.Row) -> NotificationData:
+    """Parse SQLite Row into NotificationData dataclass."""
+    try:
+        detail = json.loads(row["detail_json"]) if row["detail_json"] else {}
+    except (json.JSONDecodeError, TypeError):
+        detail = {}
+    return NotificationData(
+        notif_id=row["notif_id"],
+        job_id=row["job_id"] or "",
+        priority=row["priority"],
+        event=row["event"],
+        summary=row["summary"] or "",
+        detail=detail,
+        read_by_agent=bool(row["read_by_agent"]),
         created_at=row["created_at"],
     )
 

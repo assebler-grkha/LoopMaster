@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -79,6 +80,34 @@ def _format_results(results: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _allowed_priorities(definition: dict[str, Any] | None) -> set[str]:
+    """Per-job notification filter from spec top-level 'notify' (default: all)."""
+    spec = (definition or {}).get("spec") or {}
+    notify = spec.get("notify") if isinstance(spec, dict) else None
+    if not isinstance(notify, list):
+        return {"info", "needs_input", "critical"}
+    allowed = {str(p) for p in notify if str(p) in {"info", "needs_input", "critical"}}
+    return allowed or {"needs_input", "critical"}
+
+
+def _emit_notification(
+    store: JobStore,
+    definition: dict[str, Any] | None,
+    job_id: str,
+    priority: str,
+    event: str,
+    summary: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort outbox write respecting the job's notify filter."""
+    if priority not in _allowed_priorities(definition):
+        return
+    with contextlib.suppress(Exception):
+        store.create_notification(
+            priority=priority, event=event, summary=summary, job_id=job_id, detail=detail
+        )
+
+
 class DetachedRunner:
     """Runs loop definitions in daemon threads within the host process.
 
@@ -137,13 +166,22 @@ class DetachedRunner:
         with self._lock:
             self._events[job_id] = cancel_event
 
+        _emit_notification(
+            self._store,
+            definition,
+            job_id,
+            "info",
+            "loop_started",
+            f"Loop '{loop_def.name}' started ({len(steps)} steps)",
+        )
+
         ctx_data = dict(initial_context or {})
         ctx_data.setdefault("__job_id__", job_id)
         ctx_data.setdefault("__loop_name__", loop_def.name)
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, loop_def, ctx_data, cancel_event),
+            args=(job_id, loop_def, ctx_data, cancel_event, definition),
             name=f"lm-loop-{job_id}",
             daemon=True,
         )
@@ -196,12 +234,104 @@ class DetachedRunner:
                     logger.debug("Heartbeat failed for %s (%s)", job_id, exc)
                 next_beat = now + self._heartbeat_s
 
+    def _finalize_crash(
+        self,
+        job_id: str,
+        definition: dict[str, Any] | None,
+        cancel_event: threading.Event,
+        exc: Exception,
+        started: float,
+    ) -> None:
+        cancelled = cancel_event.is_set()
+        self._store.update_job(
+            job_id=job_id,
+            status="cancelled" if cancelled else "failed",
+            error="Cancelled by user request" if cancelled else str(exc),
+            metrics={"duration_ms": int((time.time() - started) * 1000)},
+            completed=True,
+        )
+        if not cancelled:
+            _emit_notification(
+                self._store,
+                definition,
+                job_id,
+                "critical",
+                "loop_failed",
+                f"Loop crashed: {str(exc)[:120]}",
+            )
+
+    def _finalize_result(
+        self,
+        job_id: str,
+        loop_def: LoopDef,
+        definition: dict[str, Any] | None,
+        run_result: Any,
+        cancel_event: threading.Event,
+        started: float,
+    ) -> None:
+        duration_ms = int((time.time() - started) * 1000)
+        output_results = _format_results(run_result.results)
+        metrics = {
+            "host_pid": os.getpid(),
+            "total_cost": round(run_result.total_cost, 6),
+            "total_tokens": run_result.total_tokens,
+            "duration_ms": duration_ms,
+        }
+        was_cancelled = cancel_event.is_set() or getattr(run_result, "interrupted", False)
+        if run_result.success:
+            self._store.update_job(
+                job_id=job_id,
+                status="completed",
+                results=output_results,
+                metrics=metrics,
+                completed=True,
+            )
+            _emit_notification(
+                self._store,
+                definition,
+                job_id,
+                "info",
+                "loop_completed",
+                (
+                    f"Loop '{loop_def.name}' completed: "
+                    f"{len(run_result.steps_executed)} steps, "
+                    f"cost ${run_result.total_cost:.4f}"
+                ),
+                detail={"total_tokens": run_result.total_tokens, **metrics},
+            )
+        elif was_cancelled:
+            self._store.update_job(
+                job_id=job_id,
+                status="cancelled",
+                results=output_results,
+                error="Cancelled by user request",
+                metrics=metrics,
+            )
+        else:
+            self._store.update_job(
+                job_id=job_id,
+                status="failed",
+                results=output_results,
+                error=run_result.error or "Loop execution failed",
+                metrics=metrics,
+                completed=True,
+            )
+            _emit_notification(
+                self._store,
+                definition,
+                job_id,
+                "critical",
+                "loop_failed",
+                f"Loop '{loop_def.name}' failed: {(run_result.error or 'unknown')[:120]}",
+            )
+
     def _run_job(
         self,
         job_id: str,
         loop_def: LoopDef,
         ctx_data: dict[str, Any],
         cancel_event: threading.Event,
+        definition: dict[str, Any] | None = None,
     ) -> None:
         started = time.time()
         stop_watch = threading.Event()
@@ -218,49 +348,9 @@ class DetachedRunner:
             run_result = engine.run(loop_def, initial_context=ctx_data, job_id=job_id)
         except Exception as exc:  # noqa: BLE001 - worker boundary must persist failures
             logger.exception("Detached loop %s crashed", job_id)
-            cancelled = cancel_event.is_set()
-            self._store.update_job(
-                job_id=job_id,
-                status="cancelled" if cancelled else "failed",
-                error="Cancelled by user request" if cancelled else str(exc),
-                metrics={"duration_ms": int((time.time() - started) * 1000)},
-                completed=True,
-            )
+            self._finalize_crash(job_id, definition, cancel_event, exc, started)
         else:
-            duration_ms = int((time.time() - started) * 1000)
-            output_results = _format_results(run_result.results)
-            metrics = {
-                "host_pid": os.getpid(),
-                "total_cost": round(run_result.total_cost, 6),
-                "total_tokens": run_result.total_tokens,
-                "duration_ms": duration_ms,
-            }
-            was_cancelled = cancel_event.is_set() or getattr(run_result, "interrupted", False)
-            if run_result.success:
-                self._store.update_job(
-                    job_id=job_id,
-                    status="completed",
-                    results=output_results,
-                    metrics=metrics,
-                    completed=True,
-                )
-            elif was_cancelled:
-                self._store.update_job(
-                    job_id=job_id,
-                    status="cancelled",
-                    results=output_results,
-                    error="Cancelled by user request",
-                    metrics=metrics,
-                )
-            else:
-                self._store.update_job(
-                    job_id=job_id,
-                    status="failed",
-                    results=output_results,
-                    error=run_result.error or "Loop execution failed",
-                    metrics=metrics,
-                    completed=True,
-                )
+            self._finalize_result(job_id, loop_def, definition, run_result, cancel_event, started)
         finally:
             stop_watch.set()
             with self._lock:

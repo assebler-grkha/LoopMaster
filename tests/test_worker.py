@@ -224,7 +224,12 @@ class TestAdversarialFixes:
         runner = DetachedRunner(store, poll_s=0.05)
         loop_def, _spec = load_loop_from_dict(two_step)
         job_id = runner.submit(loop_def)
-        time.sleep(0.5)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            snapshot = store.get_job(job_id)
+            if snapshot is not None and "one" in snapshot.results:
+                break
+            time.sleep(0.05)
         assert store.cancel_job(job_id) is True
 
         deadline = time.time() + 10

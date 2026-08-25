@@ -21,6 +21,7 @@ from loopmaster.llm import LLMClient, get_llm_config
 from loopmaster.mcp.discovery import find_loop_files, load_loop_def, load_loop_def_object
 from loopmaster.mcp.runtime import mcp
 from loopmaster.mcp.tools_blocks import validate_code_refs
+from loopmaster.mcp.tools_notifications import with_pending
 from loopmaster.metrics.collector import MetricsCollector
 from loopmaster.spec import SpecValidationError, load_loop_from_dict
 
@@ -57,17 +58,19 @@ def _run_spec_json(spec_json: str, context: str, mode: str) -> str:
         definition={"spec": data, "step_count": len(spec.step_names())},
     )
     return json.dumps(
-        {
-            "job_id": job_id,
-            "status": "running",
-            "loop_name": spec.name,
-            "execution_mode": mode,
-            "steps": spec.step_names(),
-            "message": (
-                "Detached loop started in worker thread. "
-                "Use loop_status/loop_result to poll; loop_cancel to stop."
-            ),
-        },
+        with_pending(
+            {
+                "job_id": job_id,
+                "status": "running",
+                "loop_name": spec.name,
+                "execution_mode": mode,
+                "steps": spec.step_names(),
+                "message": (
+                    "Detached loop started in worker thread. "
+                    "Use loop_status/loop_result to poll; loop_cancel to stop."
+                ),
+            }
+        ),
         indent=2,
     )
 
@@ -257,11 +260,13 @@ def loop_run(
     thread.start()
 
     return json.dumps(
-        {
-            "job_id": job_id,
-            "status": "running",
-            "loop_name": loop_name,
-            "message": "Loop started. Use loop_status to check progress.",
-        },
+        with_pending(
+            {
+                "job_id": job_id,
+                "status": "running",
+                "loop_name": loop_name,
+                "message": "Loop started. Use loop_status to check progress.",
+            }
+        ),
         indent=2,
     )

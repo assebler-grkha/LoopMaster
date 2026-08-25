@@ -18,16 +18,21 @@ from loopmaster.mcp.code_store import CodeBlockStoreMixin
 from loopmaster.mcp.job_ops import JobOpsMixin
 from loopmaster.mcp.loop_store import LoopStoreMixin
 from loopmaster.mcp.message_store import MessageStoreMixin
+from loopmaster.mcp.notification_store import NotificationStoreMixin
 from loopmaster.mcp.store_models import (  # noqa: F401  (re-exports)
     ACTIVE_STATUSES,
     BLOCK_LANGUAGES,
+    MESSAGE_RETENTION_S,
     MESSAGE_STATUSES,
+    NOTIFICATION_PRIORITIES,
+    NOTIFICATION_RETENTION_S,
     SCHEMA_VERSION,
     TERMINAL_STATUSES,
     CodeBlockData,
     JobData,
     LoopData,
     MessageData,
+    NotificationData,
     _split_block_ref,
     is_pid_alive,
     parse_duration,
@@ -40,8 +45,12 @@ __all__ = [
     "JobData",
     "JobStore",
     "LoopData",
+    "MESSAGE_RETENTION_S",
     "MESSAGE_STATUSES",
     "MessageData",
+    "NOTIFICATION_PRIORITIES",
+    "NOTIFICATION_RETENTION_S",
+    "NotificationData",
     "SCHEMA_VERSION",
     "TERMINAL_STATUSES",
     "_split_block_ref",
@@ -105,10 +114,27 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id);
 CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(to_addr, status);
+CREATE TABLE IF NOT EXISTS notifications (
+    notif_id TEXT PRIMARY KEY,
+    job_id TEXT,
+    priority TEXT NOT NULL,
+    event TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT,
+    read_by_agent INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(read_by_agent, priority);
 """
 
 
-class JobStore(CodeBlockStoreMixin, JobOpsMixin, LoopStoreMixin, MessageStoreMixin):
+class JobStore(
+    CodeBlockStoreMixin,
+    JobOpsMixin,
+    LoopStoreMixin,
+    MessageStoreMixin,
+    NotificationStoreMixin,
+):
     """Persistent SQLite job store with thread-safety and WAL concurrency."""
 
     def __init__(self, db_path: str | Path = ".loopmaster/jobs.db") -> None:

@@ -77,6 +77,22 @@ class HumanInputExecutor(BaseExecutor):
         with contextlib.suppress(Exception):
             store.update_job(job_id, status=status)
 
+    def _notify_waiting(
+        self, store: Any, job_id: str, text: str, msg_id: str, from_addr: str
+    ) -> None:
+        with contextlib.suppress(Exception):
+            store.create_notification(
+                priority="needs_input",
+                event="waiting_input",
+                summary=text[:120],
+                job_id=job_id,
+                detail={"msg_id": msg_id, "from_addr": from_addr, "options": self.options},
+            )
+
+    def _close_notification(self, store: Any, job_id: str) -> None:
+        with contextlib.suppress(Exception):
+            store.mark_job_notifications_read(job_id, event="waiting_input")
+
     def execute(self, ctx_data: dict[str, Any]) -> HumanInputResult:
         """Register the question and block until answered or timeout."""
         from loopmaster.mcp.job_store import parse_duration
@@ -100,6 +116,7 @@ class HumanInputExecutor(BaseExecutor):
             return HumanInputResult(success=False, error=str(exc))
         if job_id:
             self._set_status(store, job_id, "waiting_input")
+            self._notify_waiting(store, job_id, text, message.msg_id, from_addr)
 
         deadline = time.time() + parse_duration(self.timeout) if self.timeout else None
         while True:
@@ -108,10 +125,12 @@ class HumanInputExecutor(BaseExecutor):
                 answer = (current.answered or {}).get("answer")
                 if job_id:
                     self._set_status(store, job_id, "in_progress")
+                    self._close_notification(store, job_id)
                 return HumanInputResult(msg_id=message.msg_id, answer=answer)
             if current is not None and current.status in ("cancelled",):
                 if job_id:
                     self._set_status(store, job_id, "in_progress")
+                    self._close_notification(store, job_id)
                 return HumanInputResult(
                     success=False,
                     msg_id=message.msg_id,
@@ -126,6 +145,7 @@ class HumanInputExecutor(BaseExecutor):
             answer = (final.answered or {}).get("answer")
             if job_id:
                 self._set_status(store, job_id, "in_progress")
+                self._close_notification(store, job_id)
             return HumanInputResult(msg_id=message.msg_id, answer=answer)
 
         error_msg = f"input timeout after {self.timeout} ({self.on_timeout})"
@@ -140,6 +160,7 @@ class HumanInputExecutor(BaseExecutor):
                 store.answer_question(message.msg_id, self.default_answer, by="auto")
             if job_id:
                 self._set_status(store, job_id, "in_progress")
+                self._close_notification(store, job_id)
             return HumanInputResult(
                 msg_id=message.msg_id,
                 resolved="auto",

@@ -12,6 +12,7 @@ import logging
 import loopmaster.mcp.tools_blocks  # noqa: F401  (side-effect: registers tools)
 import loopmaster.mcp.tools_hitl  # noqa: F401
 import loopmaster.mcp.tools_loops  # noqa: F401
+import loopmaster.mcp.tools_notifications  # noqa: F401
 import loopmaster.mcp.tools_run  # noqa: F401
 from loopmaster.mcp.models_tools import handle_model_list, handle_model_recommend
 from loopmaster.mcp.runtime import mcp

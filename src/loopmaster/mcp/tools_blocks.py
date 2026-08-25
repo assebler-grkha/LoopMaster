@@ -8,6 +8,7 @@ from typing import Any
 
 import loopmaster.mcp.runtime as rt
 from loopmaster.mcp.runtime import mcp
+from loopmaster.mcp.tools_notifications import with_pending
 
 
 def _iter_code_nodes(node: Any) -> Iterator[dict[str, Any]]:
@@ -78,15 +79,19 @@ def block_add(
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps(
-        {
-            "added": True,
-            "ref": f"{block.name}@{block.version}",
-            "sha256": block.sha256,
-            "capabilities": block.capabilities,
-            "message": (
-                'Pin this block with "sha256": "' + block.sha256 + '" to guarantee immutability.'
-            ),
-        },
+        with_pending(
+            {
+                "added": True,
+                "ref": f"{block.name}@{block.version}",
+                "sha256": block.sha256,
+                "capabilities": block.capabilities,
+                "message": (
+                    'Pin this block with "sha256": "'
+                    + block.sha256
+                    + '" to guarantee immutability.'
+                ),
+            }
+        ),
         indent=2,
     )
 
@@ -96,9 +101,10 @@ def block_get(ref: str) -> str:
     """Fetch code-block metadata and source by 'name@X.Y.Z' ref."""
     block = rt.store.get_code_block(ref)
     if block is None:
-        return json.dumps({"error": f"code block '{ref}' not found"})
+        return json.dumps(with_pending({"error": f"code block '{ref}' not found"}), indent=2)
     return json.dumps(
-        {**block.to_dict(), "verified_sha256": rt.store.verify_code_block(ref)}, indent=2
+        with_pending({**block.to_dict(), "verified_sha256": rt.store.verify_code_block(ref)}),
+        indent=2,
     )
 
 
@@ -107,9 +113,11 @@ def block_list(pattern: str | None = None) -> str:
     """List registered code blocks (metadata only, no source)."""
     blocks = rt.store.list_code_blocks(pattern=pattern)
     return json.dumps(
-        {
-            "count": len(blocks),
-            "blocks": [b.to_dict(include_source=False) for b in blocks],
-        },
+        with_pending(
+            {
+                "count": len(blocks),
+                "blocks": [b.to_dict(include_source=False) for b in blocks],
+            }
+        ),
         indent=2,
     )

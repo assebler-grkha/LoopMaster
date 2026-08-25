@@ -26,6 +26,7 @@ from loopmaster.mcp.job_store import is_pid_alive
 from loopmaster.mcp.runtime import mcp
 from loopmaster.mcp.tools_blocks import validate_code_refs
 from loopmaster.mcp.tools_hitl import _question_view
+from loopmaster.mcp.tools_notifications import with_pending
 from loopmaster.spec import SpecValidationError, load_loop_from_dict
 
 
@@ -70,7 +71,7 @@ def loop_get(loop_name: str, search_dir: str | None = None) -> str:
         if info and info["name"] == loop_name:
             job_id = f"{loop_name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
             rt.store.create_job(job_id=job_id, loop_name=loop_name, definition=info)
-            return json.dumps({"job_id": job_id, "loop": info}, indent=2)
+            return json.dumps(with_pending({"job_id": job_id, "loop": info}), indent=2)
 
     return f"Error: Loop '{loop_name}' not found."
 
@@ -111,33 +112,39 @@ def loop_result(
     if not success and error:
         policy = _get_error_policy(job.definition, step_name)
         return json.dumps(
-            {
-                "status": "error",
-                "progress": f"{done}/{total}",
-                "error": error,
-                "suggestion": _get_recovery_suggestion(policy, error),
-            },
+            with_pending(
+                {
+                    "status": "error",
+                    "progress": f"{done}/{total}",
+                    "error": error,
+                    "suggestion": _get_recovery_suggestion(policy, error),
+                }
+            ),
             indent=2,
         )
 
     if done >= total:
         return json.dumps(
-            {
-                "status": "completed",
-                "progress": f"{done}/{total}",
-                "summary": _build_summary(job.results),
-            },
+            with_pending(
+                {
+                    "status": "completed",
+                    "progress": f"{done}/{total}",
+                    "summary": _build_summary(job.results),
+                }
+            ),
             indent=2,
         )
 
     steps = job.definition.get("steps", [])
     next_step = steps[done] if done < len(steps) else {}
     return json.dumps(
-        {
-            "status": "in_progress",
-            "progress": f"{done}/{total}",
-            "next_step": next_step,
-        },
+        with_pending(
+            {
+                "status": "in_progress",
+                "progress": f"{done}/{total}",
+                "next_step": next_step,
+            }
+        ),
         indent=2,
     )
 
@@ -176,7 +183,7 @@ def loop_status(job_id: str) -> str:
         payload["message"] = (
             "Loop is waiting for input. Answer with loop_respond(job_id, msg_id, answer)."
         )
-    return json.dumps(payload, indent=2)
+    return json.dumps(with_pending(payload), indent=2)
 
 
 @mcp.tool()
@@ -193,7 +200,10 @@ def loop_cancel(job_id: str) -> str:
     cancel_event = rt.cancel_events.get(job_id)
     if cancel_event:
         cancel_event.set()
-    return f"Loop '{job.loop_name}' cancelled."
+    return json.dumps(
+        with_pending({"cancelled": True, "job_id": job_id, "loop_name": job.loop_name}),
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -230,14 +240,16 @@ def loop_save(loop_name: str, spec_json: str) -> str:
         source_hash=loop_def.source_hash,
     )
     return json.dumps(
-        {
-            "saved": True,
-            "name": saved.name,
-            "version": saved.version,
-            "source_hash": saved.source_hash[:16],
-            "steps": _spec.step_names(),
-            "message": "Use loop_run with this loop_name or the raw spec_json.",
-        },
+        with_pending(
+            {
+                "saved": True,
+                "name": saved.name,
+                "version": saved.version,
+                "source_hash": saved.source_hash[:16],
+                "steps": _spec.step_names(),
+                "message": "Use loop_run with this loop_name or the raw spec_json.",
+            }
+        ),
         indent=2,
     )
 
@@ -246,5 +258,8 @@ def loop_save(loop_name: str, spec_json: str) -> str:
 def loop_delete(loop_name: str) -> str:
     """Delete a persisted JSON loop spec from the database."""
     if rt.store.delete_loop(loop_name):
-        return json.dumps({"deleted": True, "name": loop_name})
-    return json.dumps({"deleted": False, "error": f"Loop '{loop_name}' not found in store."})
+        return json.dumps(with_pending({"deleted": True, "name": loop_name}), indent=2)
+    return json.dumps(
+        with_pending({"deleted": False, "error": f"Loop '{loop_name}' not found in store."}),
+        indent=2,
+    )

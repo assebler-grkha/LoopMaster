@@ -29,6 +29,7 @@ _LEAF_TYPES = {"llm", "shell", "http", "mcp", "code", "human"}
 _RESERVED_PHASES: dict[str, str] = {}
 _CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_NOTIFY_PRIORITIES = {"info", "needs_input", "critical"}
 
 _PLACEHOLDER_RE = re.compile(r"\{\{?([a-zA-Z_][\w\.]*)\}?\}")
 _BRACE_CANDIDATE_RE = re.compile(r"\{[^{}]{0,80}\}")
@@ -71,6 +72,7 @@ class LoopSpec:
     error_policy: ErrorPolicy | None = None
     steps: list[Any] = field(default_factory=list)
     source_path: str | None = None
+    notify: list[str] | None = None
 
     def step_names(self) -> list[str]:
         """Flat ordered list of all step names (parallel children inline)."""
@@ -163,6 +165,7 @@ def parse_loop_spec(data: Any, *, source_path: str | None = None) -> tuple[LoopS
         error_policy=policy,
         steps=steps,
         source_path=source_path,
+        notify=list(data["notify"]) if isinstance(data.get("notify"), list) else None,
     )
     logger.debug("Parsed LoopSpec %s v%s (%d root nodes)", spec.name, spec.version, len(steps))
     return spec, steps
@@ -287,6 +290,7 @@ def _validate(node: Any, at: str) -> list[str]:
         "error_policy",
         "steps",
         "deny_capabilities",
+        "notify",
     }
     if unknown:
         _err(errors, at, f"unknown top-level keys: {sorted(unknown)}")
@@ -294,6 +298,19 @@ def _validate(node: Any, at: str) -> list[str]:
     deny = node.get("deny_capabilities")
     if deny is not None and not (isinstance(deny, list) and all(isinstance(c, str) for c in deny)):
         _err(errors, at, "'deny_capabilities' must be an array of strings")
+
+    notify = node.get("notify")
+    if notify is not None:
+        if not isinstance(notify, list) or not notify:
+            _err(errors, at, "'notify' must be a non-empty array of strings")
+        else:
+            bad = [p for p in notify if not isinstance(p, str) or p not in _NOTIFY_PRIORITIES]
+            if bad:
+                _err(
+                    errors,
+                    at,
+                    f"'notify' entries must be from {sorted(_NOTIFY_PRIORITIES)}, got {bad}",
+                )
 
     steps = node.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -411,9 +428,10 @@ def _validate_node(node: Any, at: str, errors: list[str], leaf_only: bool = Fals
         ):
             _err(errors, at, "human 'options' must be an array of strings")
         timeout = node.get("timeout")
-        if timeout is not None:
-            if not isinstance(timeout, str) or not re.fullmatch(r"(?:\d+[smhd])+", timeout):
-                _err(errors, at, "human 'timeout' must be a duration like '30m' or '1h30m'")
+        if timeout is not None and (
+            not isinstance(timeout, str) or not re.fullmatch(r"(?:\d+[smhd])+", timeout)
+        ):
+            _err(errors, at, "human 'timeout' must be a duration like '30m' or '1h30m'")
         on_timeout = node.get("on_timeout", "default_answer")
         if on_timeout not in ("default_answer", "skip", "fail", "escalate"):
             _err(
