@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shlex
+import sys
 import urllib.request
 from typing import Any
 
@@ -19,6 +22,86 @@ from loopmaster.hooks import HookVeto
 logger = logging.getLogger("loopmaster.hooks.builtin")
 
 _CODE_TYPES = {"code"}
+_SHELL_TYPES = {"shell"}
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _split_command(command: Any) -> list[str]:
+    """Split exactly like ShellExecutor does (shlex parity, A1)."""
+    if isinstance(command, list):
+        return [str(item) for item in command]
+    return shlex.split(str(command), posix=sys.platform != "win32")
+
+
+def _unquote(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _exe_basename(token: str) -> str:
+    base = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if sys.platform == "win32" and base.endswith(".exe"):
+        base = base[:-4]
+    return base
+
+
+def h_shell_allowlist(event: str, payload: dict) -> dict | None:
+    """H8: coarse command policy for shell steps via LM_SHELL_ALLOWLIST / LM_SHELL_BLOCKLIST.
+
+    This is a policy gate, not a sandbox: interpreters on the allowlist
+    (``python -c`` etc.) remain code-execution-equivalent. All failure paths
+    raise :class:`HookVeto` — the hook framework swallows ordinary exceptions,
+    so an internal error must never degrade to "allow".
+    """
+    allow_raw = os.environ.get("LM_SHELL_ALLOWLIST", "")
+    block_raw = os.environ.get("LM_SHELL_BLOCKLIST", "")
+    allow = None
+    if allow_raw.strip():
+        allow = {entry.strip().lower() for entry in allow_raw.split(",") if entry.strip()}
+        if not allow:
+            raise HookVeto("LM_SHELL_ALLOWLIST is set but contains no valid entries")
+    block = {entry.strip().lower() for entry in block_raw.split(",") if entry.strip()}
+    if allow is None and not block:
+        return None
+    try:
+        return _check_shell_policy(payload.get("spec"), allow, block)
+    except HookVeto:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail-closed by design
+        raise HookVeto(f"shell-allowlist internal error: {exc}") from exc
+
+
+def _check_shell_policy(spec: Any, allow: set[str] | None, block: set[str]) -> dict:
+    from loopmaster.spec.loader import _PLACEHOLDER_RE
+
+    checked = 0
+    for node in _walk_nodes((spec or {}).get("steps")):
+        if node.get("type") not in _SHELL_TYPES:
+            continue
+        name = node.get("name")
+        if node.get("shell") is True:
+            raise HookVeto(
+                f"shell step '{name}': shell=true is not permitted while command policy is active"
+            )
+        tokens = [_unquote(token) for token in _split_command(node.get("command"))]
+        if not tokens:
+            raise HookVeto(f"shell step '{name}': empty or unparseable command")
+        exe = tokens[0]
+        if _PLACEHOLDER_RE.search(exe):
+            raise HookVeto(f"shell step '{name}': executable '{exe}' is not a static value")
+        if allow is not None:
+            if "/" in exe or "\\" in exe or _DRIVE_PREFIX_RE.match(exe) or exe.startswith("\\\\"):
+                raise HookVeto(
+                    f"shell step '{name}': path-separated executable '{exe}' is not permitted"
+                )
+            base = _exe_basename(exe)
+            if base not in allow:
+                raise HookVeto(f"shell step '{name}': '{base}' is not in LM_SHELL_ALLOWLIST")
+        elif _exe_basename(exe) in block:
+            raise HookVeto(f"shell step '{name}': '{_exe_basename(exe)}' is blocked")
+        checked += 1
+    return {"commands_checked": checked}
 
 
 def _walk_nodes(nodes: Any):
@@ -138,11 +221,13 @@ def h_archive_sweeper(store: Any) -> dict:
 
 
 def register_builtins() -> None:
-    """Register H1-H5 under their hook events (H6/H7 run via CLI maintenance)."""
+    """Register H1-H8 under their hook events (H6/H7 run via CLI maintenance)."""
     hooks.register(hooks.BEFORE_LOOP_SAVE, "validate-spec", h_validate_spec)
     hooks.register(hooks.BEFORE_LOOP_SAVE, "verify-blocks", h_verify_blocks)
+    hooks.register(hooks.BEFORE_LOOP_SAVE, "shell-allowlist", h_shell_allowlist)
     hooks.register(hooks.BEFORE_LOOP_RUN, "validate-spec", h_validate_spec)
     hooks.register(hooks.BEFORE_LOOP_RUN, "verify-blocks", h_verify_blocks)
+    hooks.register(hooks.BEFORE_LOOP_RUN, "shell-allowlist", h_shell_allowlist)
     hooks.register(hooks.BEFORE_LOOP_RUN, "budget-guard", h_budget_guard)
     hooks.register(hooks.NOTIFICATION_CREATED, "notify-dispatcher", h_notify_dispatcher)
     hooks.register(hooks.HITL_ESCALATION, "hitl-escalate", h_hitl_escalate)
