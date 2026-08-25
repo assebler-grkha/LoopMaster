@@ -49,7 +49,9 @@ def wait_terminal(store, job_id: str, timeout: float = 10.0) -> Any:
     deadline = time.time() + timeout
     while time.time() < deadline:
         job = store.get_job(job_id)
-        if job.status in ("completed", "failed", "error", "interrupted", "cancelled"):
+        # 'error' is an interim per-step marker (SKIP policy keeps running);
+        # only the worker finalize lands a true terminal status.
+        if job.status in ("completed", "failed", "interrupted", "cancelled"):
             return job
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} did not reach terminal state")

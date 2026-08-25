@@ -181,6 +181,32 @@
           }
         },
         {
+          "if": { "properties": { "type": { "const": "human" } } },
+          "then": {
+            "required": ["question"],
+            "properties": {
+              "question": { "type": "string", "minLength": 1 },
+              "ask": { "type": "string", "minLength": 1, "default": "agent" },
+              "options": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional answer choices shown to the responder."
+              },
+              "timeout": {
+                "type": "string",
+                "pattern": "^(?:\\d+[smhd])+$",
+                "description": "How long to wait for an answer, e.g. '30m' or '1h30m'."
+              },
+              "default_answer": {},
+              "on_timeout": {
+                "type": "string",
+                "enum": ["default_answer", "skip", "fail", "escalate"],
+                "default": "default_answer"
+              }
+            }
+          }
+        },
+        {
           "if": { "properties": { "type": { "const": "parallel" } } },
           "then": {
             "required": ["steps"],
@@ -194,7 +220,7 @@
                   "properties": {
                     "type": {
                       "type": "string",
-                      "enum": ["llm", "shell", "http", "mcp", "code"]
+                      "enum": ["llm", "shell", "http", "mcp", "code", "human"]
                     },
                     "name": { "type": "string", "minLength": 1 }
                   }

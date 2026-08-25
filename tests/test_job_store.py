@@ -66,6 +66,16 @@ class TestJobStoreBasics:
         assert j2.completed_at is not None
         assert j2.current_step == 2
 
+        no_auto = store.record_step_result(
+            job_id="job-step-test",
+            step_name="step_3",
+            success=True,
+            output="late",
+            auto_complete=False,
+        )
+        assert no_auto is not None
+        assert no_auto.status == "completed"
+
     def test_record_step_result_failure(self, tmp_path: Path):
         db_file = tmp_path / "test_jobs.db"
         store = JobStore(db_path=db_file)
@@ -117,7 +127,7 @@ class TestJobStoreBasics:
         store2.record_step_result("persist-1", "s2", True, "result 2")
         store2.record_step_result("persist-1", "s3", True, "result 3")
 
-        completed_job = store2.get_job("persist-1")
+        completed_job = store2.update_job(job_id="persist-1", results={"s3": "r3"}, completed=True)
         assert completed_job is not None
         assert completed_job.status == "completed"
         store2.close()

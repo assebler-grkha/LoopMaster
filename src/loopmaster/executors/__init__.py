@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from .base import BaseExecutor, resolve_path_value, resolve_template_value
+from .code_block import CodeBlockExecutor, CodeBlockResult
 from .http import HTTPExecutor, HTTPResult
+from .human_input import HumanInputExecutor, HumanInputResult
 from .mcp import MCPToolExecutor, MCPToolResult
 from .shell import ShellExecutor, ShellResult
 
@@ -17,4 +19,8 @@ __all__ = [
     "HTTPResult",
     "MCPToolExecutor",
     "MCPToolResult",
+    "CodeBlockExecutor",
+    "CodeBlockResult",
+    "HumanInputExecutor",
+    "HumanInputResult",
 ]

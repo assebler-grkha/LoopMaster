@@ -17,14 +17,18 @@ from typing import Any
 
 logger = logging.getLogger("loopmaster.mcp.job_store")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
-ACTIVE_STATUSES = frozenset({"ready", "running", "in_progress"})
+ACTIVE_STATUSES = frozenset({"ready", "running", "in_progress", "waiting_input"})
 BLOCK_LANGUAGES = frozenset({"python", "shell"})
 _CAPABILITY_RE = re.compile(r"^net$|^fs:(read|write):.+$")
 _CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
 _CODE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_POISON_REF_RE = re.compile(r"\{[a-zA-Z_]\w*\}")
+_DURATION_RE = re.compile(r"(\d+)([smhd])")
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+MESSAGE_STATUSES = frozenset({"pending", "answered", "expired", "cancelled"})
 
 
 def _split_block_ref(ref: str) -> tuple[str, str | None]:
@@ -33,6 +37,27 @@ def _split_block_ref(ref: str) -> tuple[str, str | None]:
         name, _, version = ref.partition("@")
         return name, version
     return ref, None
+
+
+def parse_duration(text: str) -> float:
+    """Parse a compound duration string like '1h30m' into seconds."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("duration must be a non-empty string like '30s', '24h' or '1h30m'")
+    matches = list(_DURATION_RE.finditer(text))
+    if not matches:
+        raise ValueError(f"invalid duration {text!r}: expected chunks like 10s/5m/2h/1d")
+    covered = sum(len(m.group(0)) for m in matches)
+    if covered != len(text.replace(" ", "")):
+        raise ValueError(f"invalid duration {text!r}: unexpected characters")
+    total = 0.0
+    seen_units: set[str] = set()
+    for m in matches:
+        unit = m.group(2)
+        if unit in seen_units:
+            raise ValueError(f"invalid duration {text!r}: repeated unit {unit!r}")
+        seen_units.add(unit)
+        total += int(m.group(1)) * _DURATION_UNITS[unit]
+    return float(total)
 
 
 def is_pid_alive(pid: int | None) -> bool:
@@ -146,6 +171,37 @@ class CodeBlockData:
         return data
 
 
+@dataclass
+class MessageData:
+    """A HITL protocol message (question/answer) routed between loop and agent."""
+
+    msg_id: str
+    job_id: str
+    from_addr: str
+    to_addr: str
+    type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    status: str = "pending"
+    created_at: float = field(default_factory=time.time)
+    expires_at: float | None = None
+    answered: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            "msg_id": self.msg_id,
+            "job_id": self.job_id,
+            "from_addr": self.from_addr,
+            "to_addr": self.to_addr,
+            "type": self.type,
+            "payload": self.payload,
+            "status": self.status,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "answered": self.answered,
+        }
+
+
 class JobStore:
     """Persistent SQLite job store with thread-safety and WAL concurrency."""
 
@@ -221,6 +277,21 @@ class JobStore:
                     UNIQUE(name, version)
                 );
                 CREATE INDEX IF NOT EXISTS idx_code_blocks_name ON code_blocks(name);
+                CREATE TABLE IF NOT EXISTS messages (
+                    msg_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    from_addr TEXT NOT NULL,
+                    to_addr TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    reply_to TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at REAL NOT NULL,
+                    expires_at REAL,
+                    answered_json TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id);
+                CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(to_addr, status);
                 """
             )
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -424,6 +495,147 @@ class JobStore:
             return False
         return hashlib.sha256(block.source.encode("utf-8")).hexdigest() == block.sha256
 
+    @staticmethod
+    def _guard_poison_refs(texts: list[str]) -> None:
+        """Reject template-like placeholders that SKIP would leave as literals."""
+        for text in texts:
+            if text and _POISON_REF_RE.search(text):
+                raise ValueError(
+                    f"placeholder {text!r} is not allowed here: "
+                    "on timeout it would stay a literal — pass plain text or use default_answer"
+                )
+
+    def create_question(
+        self,
+        job_id: str,
+        from_addr: str,
+        text: str,
+        options: list[str] | None = None,
+        timeout_s: float | None = None,
+        default_answer: Any = None,
+        to_addr: str = "agent",
+    ) -> MessageData:
+        """Register a HITL question (idempotent per job_id+from_addr)."""
+        poison_candidates = [text]
+        if default_answer is not None:
+            poison_candidates.append(str(default_answer))
+        self._guard_poison_refs(poison_candidates)
+        for opt in options or []:
+            self._guard_poison_refs([str(opt)])
+        msg_id = hashlib.sha256(f"{job_id}|{from_addr}".encode()).hexdigest()
+        now = time.time()
+        expires_at = (now + timeout_s) if timeout_s else None
+        payload = {"text": str(text), "options": list(options or [])}
+        if default_answer is not None:
+            payload["default_answer"] = default_answer
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO messages (
+                    msg_id, job_id, from_addr, to_addr, type,
+                    payload_json, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, 'question', ?, 'pending', ?, ?)
+                ON CONFLICT(msg_id) DO NOTHING
+                """,
+                (
+                    msg_id,
+                    job_id,
+                    from_addr,
+                    to_addr,
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                    expires_at,
+                ),
+            )
+            self.conn.commit()
+            cur.close()
+        message = self.get_message(msg_id)
+        assert message is not None
+        return message
+
+    def answer_question(self, msg_id: str, answer: Any, by: str = "agent") -> MessageData:
+        """Answer a pending question; raises ValueError on already-answered/expired."""
+        answered = {"answer": answer, "by": by}
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE messages SET status = 'answered', answered_json = ? "
+                "WHERE msg_id = ? AND status = 'pending'",
+                (json.dumps(answered, ensure_ascii=False), msg_id),
+            )
+            updated = cur.rowcount > 0
+            self.conn.commit()
+            cur.close()
+        message = self.get_message(msg_id)
+        if message is None:
+            raise KeyError(f"message '{msg_id}' not found")
+        if not updated:
+            raise ValueError(
+                f"already_{message.status}"
+                if message.status != "pending"
+                else f"message '{msg_id}' is still pending"
+            )
+        return message
+
+    def get_message(self, msg_id: str) -> MessageData | None:
+        """Fetch a single message by id."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM messages WHERE msg_id = ?", (msg_id,))
+            row = cur.fetchone()
+            cur.close()
+        return _row_to_message(row) if row is not None else None
+
+    def sweep_expired_questions(self, now: float | None = None) -> int:
+        """Mark expired pending questions; returns how many were swept."""
+        moment = time.time() if now is None else now
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE messages SET status = 'expired' "
+                "WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
+                (moment,),
+            )
+            swept = cur.rowcount
+            self.conn.commit()
+            cur.close()
+            return swept
+
+    def list_questions(
+        self,
+        job_id: str | None = None,
+        status: str = "pending",
+    ) -> list[MessageData]:
+        """List messages of type question (pending by default), oldest first."""
+        if status not in MESSAGE_STATUSES:
+            raise ValueError(f"invalid message status {status!r}")
+        query = "SELECT * FROM messages WHERE type = 'question' AND status = ?"
+        params: list[Any] = [status]
+        if job_id is not None:
+            query += " AND job_id = ?"
+            params.append(job_id)
+        query += " ORDER BY created_at ASC LIMIT 200"
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            cur.close()
+        return [_row_to_message(row) for row in rows]
+
+    def cancel_pending_messages(self, job_id: str) -> int:
+        """Cancel all pending messages of a job."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE messages SET status = 'cancelled' WHERE job_id = ? AND status = 'pending'",
+                (job_id,),
+            )
+            cancelled = cur.rowcount
+            self.conn.commit()
+            cur.close()
+            return cancelled
+
     def create_job(
         self,
         job_id: str,
@@ -571,8 +783,14 @@ class JobStore:
         success: bool,
         output: Any = None,
         error: str | None = None,
+        auto_complete: bool = True,
     ) -> JobData | None:
-        """Record the result of a single step."""
+        """Record the result of a single step.
+
+        auto_complete marks the job completed once every recorded leaf is in;
+        detached workers pass False because their finalize step owns terminal
+        status (root-vs-leaf counting misreports conditional/parallel trees).
+        """
         with self._lock:
             job = self.get_job(job_id)
             if not job:
@@ -597,7 +815,7 @@ class JobStore:
             if failed > 0:
                 job.status = "error"
                 job.error = error or job.error
-            elif job.total_steps > 0 and len(job.results) >= job.total_steps:
+            elif auto_complete and job.total_steps > 0 and len(job.results) >= job.total_steps:
                 job.status = "completed"
                 job.completed_at = now
             else:
@@ -651,7 +869,7 @@ class JobStore:
             return [self._row_to_job(r) for r in rows]
 
     def cancel_job(self, job_id: str) -> bool:
-        """Cancel a running or ready job."""
+        """Cancel a running or ready job (and its pending HITL questions)."""
         with self._lock:
             job = self.get_job(job_id)
             if not job or job.status in ("completed", "failed", "cancelled"):
@@ -662,9 +880,14 @@ class JobStore:
                 "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ?",
                 ("cancelled", now, job_id),
             )
+            cancelled = cur.rowcount > 0
+            cur.execute(
+                "UPDATE messages SET status = 'cancelled' WHERE job_id = ? AND status = 'pending'",
+                (job_id,),
+            )
             self.conn.commit()
             cur.close()
-            return True
+            return cancelled
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job record."""
@@ -677,7 +900,7 @@ class JobStore:
             return deleted
 
     def touch_job(self, job_id: str) -> bool:
-        """Refresh updated_at for a non-terminal job (worker heartbeat)."""
+        """Refresh updated_at for a non-terminal, non-waiting job (heartbeat)."""
         with self._lock:
             cur = self.conn.cursor()
             cur.execute(
@@ -711,7 +934,8 @@ class JobStore:
             now = time.time()
             cur = self.conn.cursor()
             cur.execute(
-                "SELECT job_id, metrics FROM jobs WHERE status IN ('running', 'in_progress')"
+                "SELECT job_id, metrics FROM jobs "
+                "WHERE status IN ('running', 'in_progress', 'waiting_input')"
             )
             rows = cur.fetchall()
             for row in rows:
@@ -788,6 +1012,34 @@ def _row_to_code_block(row: sqlite3.Row) -> CodeBlockData:
         capabilities=[str(c) for c in caps],
         description=row["description"] or "",
         created_at=row["created_at"],
+    )
+
+
+def _row_to_message(row: sqlite3.Row) -> MessageData:
+    """Parse SQLite Row into MessageData dataclass."""
+    try:
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    answered: dict[str, Any] | None
+    if row["answered_json"]:
+        try:
+            answered = json.loads(row["answered_json"])
+        except (json.JSONDecodeError, TypeError):
+            answered = None
+    else:
+        answered = None
+    return MessageData(
+        msg_id=row["msg_id"],
+        job_id=row["job_id"],
+        from_addr=row["from_addr"],
+        to_addr=row["to_addr"],
+        type=row["type"],
+        payload=payload,
+        status=row["status"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        answered=answered,
     )
 
 

@@ -129,13 +129,30 @@ class TestValidateLoopSpec:
         errors = validate_loop_spec(data)
         assert any("'ref'" in e for e in errors)
 
-    def test_reserved_human_type_rejected_with_phase(self):
+    def test_human_type_requires_question(self):
         data = {
             **MINIMAL_SPEC,
             "steps": [{"type": "human", "name": "ask"}],
         }
         errors = validate_loop_spec(data)
-        assert any("Phase 4" in e for e in errors)
+        assert any("question" in e for e in errors)
+
+    def test_human_type_valid_full_node(self):
+        data = {
+            **MINIMAL_SPEC,
+            "steps": [
+                {
+                    "type": "human",
+                    "name": "confirm",
+                    "question": "Proceed?",
+                    "options": ["yes", "no"],
+                    "timeout": "30m",
+                    "default_answer": "no",
+                    "on_timeout": "skip",
+                }
+            ],
+        }
+        assert validate_loop_spec(data) == []
 
     def test_parallel_nesting_rejected(self):
         data = {

@@ -56,6 +56,8 @@ def _normalize_output(value: Any) -> Any:
         return value.content
     if type(value).__name__ == "CodeBlockResult":
         return value.to_dict()
+    if type(value).__name__ == "HumanInputResult":
+        return value.to_dict()
     if hasattr(value, "stdout"):
         return {
             "stdout": getattr(value, "stdout", None),
@@ -135,9 +137,13 @@ class DetachedRunner:
         with self._lock:
             self._events[job_id] = cancel_event
 
+        ctx_data = dict(initial_context or {})
+        ctx_data.setdefault("__job_id__", job_id)
+        ctx_data.setdefault("__loop_name__", loop_def.name)
+
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, loop_def, dict(initial_context or {}), cancel_event),
+            args=(job_id, loop_def, ctx_data, cancel_event),
             name=f"lm-loop-{job_id}",
             daemon=True,
         )
@@ -229,6 +235,7 @@ class DetachedRunner:
                 "total_tokens": run_result.total_tokens,
                 "duration_ms": duration_ms,
             }
+            was_cancelled = cancel_event.is_set() or getattr(run_result, "interrupted", False)
             if run_result.success:
                 self._store.update_job(
                     job_id=job_id,
@@ -236,6 +243,14 @@ class DetachedRunner:
                     results=output_results,
                     metrics=metrics,
                     completed=True,
+                )
+            elif was_cancelled:
+                self._store.update_job(
+                    job_id=job_id,
+                    status="cancelled",
+                    results=output_results,
+                    error="Cancelled by user request",
+                    metrics=metrics,
                 )
             else:
                 self._store.update_job(
@@ -260,6 +275,7 @@ class DetachedRunner:
                 success=result.success,
                 output=value,
                 error=result.error,
+                auto_complete=False,
             )
         except Exception:
             logger.debug(

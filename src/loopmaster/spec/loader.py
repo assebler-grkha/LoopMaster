@@ -15,6 +15,7 @@ from loopmaster.core.policies import Budget, ErrorPolicy, RecoveryAction
 from loopmaster.core.types import Conditional, LoopDef, Parallel, Step
 from loopmaster.executors.code_block import CodeBlockExecutor
 from loopmaster.executors.http import HTTPExecutor
+from loopmaster.executors.human_input import HumanInputExecutor
 from loopmaster.executors.mcp import MCPToolExecutor
 from loopmaster.executors.shell import ShellExecutor
 
@@ -24,10 +25,8 @@ SPEC_VERSION = "1.0"
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-_LEAF_TYPES = {"llm", "shell", "http", "mcp", "code"}
-_RESERVED_PHASES = {
-    "human": "Phase 4 (HITL protocol)",
-}
+_LEAF_TYPES = {"llm", "shell", "http", "mcp", "code", "human"}
+_RESERVED_PHASES: dict[str, str] = {}
 _CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -399,6 +398,36 @@ def _validate_node(node: Any, at: str, errors: list[str], leaf_only: bool = Fals
             _err(errors, at, "code 'input' must be an object")
         _check_positive_number(node, "timeout", at, errors)
 
+    elif ntype == "human":
+        question = node.get("question")
+        if not isinstance(question, str) or not question.strip():
+            _err(errors, at, "human step requires non-empty string 'question'")
+        ask = node.get("ask", "agent")
+        if not isinstance(ask, str) or not ask.strip():
+            _err(errors, at, "human 'ask' must be a non-empty string")
+        options = node.get("options")
+        if options is not None and not (
+            isinstance(options, list) and all(isinstance(o, str) for o in options)
+        ):
+            _err(errors, at, "human 'options' must be an array of strings")
+        timeout = node.get("timeout")
+        if timeout is not None:
+            if not isinstance(timeout, str) or not re.fullmatch(r"(?:\d+[smhd])+", timeout):
+                _err(errors, at, "human 'timeout' must be a duration like '30m' or '1h30m'")
+        on_timeout = node.get("on_timeout", "default_answer")
+        if on_timeout not in ("default_answer", "skip", "fail", "escalate"):
+            _err(
+                errors,
+                at,
+                "human 'on_timeout' must be one of default_answer|skip|fail|escalate",
+            )
+        if on_timeout == "default_answer" and "default_answer" not in node:
+            _err(
+                errors,
+                at,
+                "human 'default_answer' is required when on_timeout='default_answer'",
+            )
+
     elif ntype == "parallel":
         children = node.get("steps")
         if not isinstance(children, list) or not children:
@@ -558,6 +587,11 @@ def _walk_semantics(
             for text in _collect_strings(node.get("input")):
                 _check_template_refs(text, known, at, errors)
 
+        elif ntype == "human":
+            question = node.get("question")
+            if isinstance(question, str):
+                _check_template_refs(question, known, at, errors)
+
         elif ntype == "parallel":
             # Children run concurrently: siblings must not reference each
             # other's outputs; only the enclosing scope is visible. Merge all
@@ -690,6 +724,20 @@ def _build_node(
             timeout=node.get("timeout"),
         )
 
+    if ntype == "human":
+        return Step(
+            name=name,
+            executor=HumanInputExecutor(
+                step_name=name,
+                question=node["question"],
+                ask_to=node.get("ask", "agent"),
+                options=node.get("options"),
+                timeout=node.get("timeout"),
+                default_answer=node.get("default_answer"),
+                on_timeout=node.get("on_timeout", "default_answer"),
+            ),
+        )
+
     if ntype == "parallel":
         children = [
             Step(**_leaf_fields(c, deny_capabilities=_kwargs.get("deny_capabilities") or []))
@@ -750,6 +798,16 @@ def _leaf_fields(
             input=node.get("input"),
             timeout=float(node.get("timeout", 60.0)),
             deny_capabilities=deny_capabilities or [],
+        )
+    elif ntype == "human":
+        base["executor"] = HumanInputExecutor(
+            step_name=node["name"],
+            question=node["question"],
+            ask_to=node.get("ask", "agent"),
+            options=node.get("options"),
+            timeout=node.get("timeout"),
+            default_answer=node.get("default_answer"),
+            on_timeout=node.get("on_timeout", "default_answer"),
         )
     else:
         raise SpecValidationError([f"type '{ntype}' cannot nest inside parallel"])
