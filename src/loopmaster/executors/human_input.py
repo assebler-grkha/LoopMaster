@@ -15,6 +15,7 @@ from typing import Any
 from loopmaster.executors.base import BaseExecutor, resolve_template_value
 
 TIMEOUT_POLICIES = ("default_answer", "skip", "fail", "escalate")
+MAX_ESCALATIONS = 3
 
 
 @dataclass
@@ -144,6 +145,7 @@ class HumanInputExecutor(BaseExecutor):
 
         timeout_s = parse_duration(self.timeout) if self.timeout else None
         deadline = time.time() + timeout_s if timeout_s is not None else None
+        escalations = 0
         while True:
             current = store.get_message(message.msg_id)
             if current is not None and current.status == "answered":
@@ -162,7 +164,8 @@ class HumanInputExecutor(BaseExecutor):
                     error="input cancelled",
                 )
             if deadline is not None and time.time() >= deadline:
-                if self.on_timeout == "escalate":
+                if self.on_timeout == "escalate" and escalations < MAX_ESCALATIONS:
+                    escalations += 1
                     self._escalate(store, job_id, text, message.msg_id, from_addr)
                     deadline = time.time() + timeout_s if timeout_s is not None else None
                     continue
@@ -182,7 +185,8 @@ class HumanInputExecutor(BaseExecutor):
             return HumanInputResult(
                 success=False,
                 msg_id=message.msg_id,
-                error="escalation requires Phase 5 notifications; treat as timeout",
+                error=f"input timeout after {self.timeout}: "
+                f"escalation limit ({MAX_ESCALATIONS}) reached without an answer",
             )
         if self.on_timeout == "default_answer" and self.default_answer is not None:
             with contextlib.suppress(ValueError):

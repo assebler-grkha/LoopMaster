@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import BaseExecutor, resolve_template_value
+from .base import BaseExecutor, build_minimal_env, resolve_template_value
 
 logger = logging.getLogger("loopmaster.executors.shell")
 
@@ -78,6 +78,7 @@ class ShellExecutor(BaseExecutor):
         capture_output: bool = True,
         check: bool = False,
         shell: bool = False,
+        env_inherit: bool = False,
     ) -> None:
         self.command = command
         self.cwd = str(cwd) if cwd is not None else None
@@ -86,6 +87,7 @@ class ShellExecutor(BaseExecutor):
         self.capture_output = capture_output
         self.check = check
         self.shell = shell
+        self.env_inherit = bool(env_inherit)
 
     def _build_command_args(self, ctx_data: dict[str, Any]) -> str | list[str]:
         """Resolve templated variables and format command arguments safely."""
@@ -144,7 +146,11 @@ class ShellExecutor(BaseExecutor):
     def execute(self, ctx_data: dict[str, Any]) -> ShellResult:
         """Execute the command within a CLIENT OTel span."""
         cmd_args = self._build_command_args(ctx_data)
-        custom_env = dict(os.environ)
+        if self.env_inherit:
+            # Explicit opt-in: pass the full host environment to the child.
+            custom_env = dict(os.environ)
+        else:
+            custom_env = build_minimal_env(allow=list(self.env or {}))
         if self.env:
             for k, v in self.env.items():
                 custom_env[k] = str(resolve_template_value(v, ctx_data))

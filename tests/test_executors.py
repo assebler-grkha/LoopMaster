@@ -104,6 +104,12 @@ class TestShellExecutor:
         assert "timed out" in (result.error or "").lower()
 
 
+def _once(payload):
+    """Return a read(*a) callable yielding payload once then empty bytes."""
+    it = iter([payload])
+    return lambda *a: next(it, b"")
+
+
 class TestHTTPExecutor:
     def test_successful_get_request(self):
         executor = HTTPExecutor(
@@ -114,7 +120,7 @@ class TestHTTPExecutor:
 
         mock_resp = MagicMock()
         mock_resp.status = 200
-        mock_resp.read.return_value = b'{"name": "LoopMaster", "stars": 100}'
+        mock_resp.read.side_effect = [b'{"name": "LoopMaster", "stars": 100}', b""]
         mock_resp.headers.items.return_value = [("Content-Type", "application/json")]
         mock_resp.__enter__.return_value = mock_resp
 
@@ -135,7 +141,7 @@ class TestHTTPExecutor:
             code=404,
             msg="Not Found",
             hdrs={},  # type: ignore[arg-type]
-            fp=MagicMock(read=lambda: b'{"error": "resource not found"}'),
+            fp=MagicMock(read=_once(b'{"error": "resource not found"}')),
         )
 
         with patch("urllib.request.urlopen", side_effect=http_err):
@@ -150,7 +156,7 @@ class TestHTTPExecutor:
 
         mock_resp = MagicMock()
         mock_resp.status = 204
-        mock_resp.read.return_value = b""
+        mock_resp.read.side_effect = [b"", b""]
         mock_resp.headers.items.return_value = []
         mock_resp.__enter__.return_value = mock_resp
 
@@ -249,7 +255,7 @@ class TestLoopEngineToolIntegration:
             code=404,
             msg="Not Found",
             hdrs={},  # type: ignore[arg-type]
-            fp=MagicMock(read=lambda: b'{"status": "not found but expected"}'),
+            fp=MagicMock(read=_once(b'{"status": "not found but expected"}')),
         )
 
         with patch("urllib.request.urlopen", side_effect=http_err):

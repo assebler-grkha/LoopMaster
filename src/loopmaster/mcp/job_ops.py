@@ -66,6 +66,7 @@ class JobOpsMixin(StoreHost):
                     completed_at = NULL,
                     error = NULL,
                     metrics = excluded.metrics
+                WHERE jobs.status IN ('completed', 'failed', 'cancelled', 'interrupted')
                 """,
                 (
                     job.job_id,
@@ -82,7 +83,7 @@ class JobOpsMixin(StoreHost):
             )
             self.conn.commit()
             cur.close()
-        return job
+        return self.get_job(job_id) or job
 
     def get_job(self, job_id: str) -> JobData | None:
         """Retrieve a job by ID."""
@@ -138,6 +139,10 @@ class JobOpsMixin(StoreHost):
                     status = ?, current_step = ?, total_steps = ?, definition = ?,
                     results = ?, completed_at = ?, error = ?, metrics = ?, updated_at = ?
                 WHERE job_id = ?
+                  AND (
+                      status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+                      OR (status = 'completed' AND ? = 'completed')
+                  )
                 """,
                 (
                     job.status,
@@ -150,10 +155,15 @@ class JobOpsMixin(StoreHost):
                     json.dumps(job.metrics, default=str) if job.metrics else None,
                     job.updated_at,
                     job.job_id,
+                    job.status,
                 ),
             )
+            raced = cur.rowcount == 0
             self.conn.commit()
             cur.close()
+            if raced:
+                logger.debug("Job %s update raced with another writer; refetching", job_id)
+                return self.get_job(job_id)
             return job
 
     def record_step_result(
@@ -216,6 +226,7 @@ class JobOpsMixin(StoreHost):
                     status = ?, current_step = ?, results = ?,
                     error = ?, completed_at = ?, updated_at = ?
                 WHERE job_id = ?
+                  AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
                 """,
                 (
                     job.status,
@@ -227,8 +238,14 @@ class JobOpsMixin(StoreHost):
                     job.job_id,
                 ),
             )
+            raced = cur.rowcount == 0
             self.conn.commit()
             cur.close()
+            if raced:
+                logger.debug(
+                    "Job %s step result raced with a terminal transition; refetching", job_id
+                )
+                return self.get_job(job_id)
             return job
 
     def list_jobs(
@@ -265,7 +282,8 @@ class JobOpsMixin(StoreHost):
             now = time.time()
             cur = self.conn.cursor()
             cur.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ?",
+                "UPDATE jobs SET status = ?, updated_at = ? WHERE job_id = ? "
+                "AND status NOT IN ('completed', 'failed', 'cancelled')",
                 ("cancelled", now, job_id),
             )
             cancelled = cur.rowcount > 0

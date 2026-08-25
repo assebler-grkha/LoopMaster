@@ -14,6 +14,58 @@ from .base import BaseExecutor, resolve_template_value
 
 logger = logging.getLogger("loopmaster.executors.http")
 
+MAX_RESPONSE_BYTES = 1024 * 1024
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+def _validate_url(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        return f"URL scheme {parsed.scheme!r} is not permitted (allowed: http, https)"
+    return None
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirect downgrades (https -> http) and strip auth headers."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        new_parsed = urllib.parse.urlparse(newurl)
+        if new_parsed.scheme not in _ALLOWED_SCHEMES:
+            raise urllib.error.HTTPError(
+                newurl, code, f"redirect to disallowed scheme {new_parsed.scheme!r}", headers, fp
+            )
+        old_parsed = urllib.parse.urlparse(req.full_url)
+        if old_parsed.scheme == "https" and new_parsed.scheme == "http":
+            raise urllib.error.HTTPError(
+                newurl, code, "refusing https to http downgrade", headers, fp
+            )
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and old_parsed.netloc != new_parsed.netloc:
+            new_req.headers.pop("Authorization", None)
+        return new_req
+
+
+_opener = urllib.request.build_opener(_SafeRedirectHandler)
+urllib.request.install_opener(_opener)
+
+
+def _read_capped(stream: Any, limit: int = MAX_RESPONSE_BYTES) -> tuple[bytes, bool]:
+    chunks: list[bytes] = []
+    total = 0
+    overflow = False
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            break
+        if not overflow:
+            total += len(chunk)
+            if total > limit:
+                overflow = True
+                chunks.clear()
+            else:
+                chunks.append(chunk)
+    return b"".join(chunks), overflow
+
 
 @dataclass
 class HTTPResult:
@@ -79,6 +131,9 @@ class HTTPExecutor(BaseExecutor):
 
     def _prepare_request(self, ctx_data: dict[str, Any]) -> tuple[urllib.request.Request, str]:
         resolved_url = str(resolve_template_value(self.url, ctx_data))
+        url_error = _validate_url(resolved_url)
+        if url_error:
+            raise ValueError(url_error)
         resolved_headers = {
             k: str(resolve_template_value(v, ctx_data)) for k, v in self.headers.items()
         }
@@ -103,8 +158,16 @@ class HTTPExecutor(BaseExecutor):
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 status = getattr(resp, "status", 200)
-                raw = resp.read()
+                raw, overflow = _read_capped(resp)
                 resp_headers = dict(resp.headers.items()) if hasattr(resp, "headers") else {}
+                if overflow:
+                    return HTTPResult(
+                        status_code=status,
+                        body=None,
+                        headers=resp_headers,
+                        success=False,
+                        error=f"response body exceeded the {MAX_RESPONSE_BYTES}-byte limit",
+                    )
                 body = _parse_body(raw, self.json_output)
                 success = status in self.allowed_status
                 err = None if success else f"HTTP status {status} not in allowed statuses"
@@ -112,7 +175,7 @@ class HTTPExecutor(BaseExecutor):
                     status_code=status, body=body, headers=resp_headers, success=success, error=err
                 )
         except urllib.error.HTTPError as err:
-            raw_err = err.read()
+            raw_err, _ = _read_capped(err)
             err_headers = dict(err.headers.items()) if hasattr(err, "headers") else {}
             body = _parse_body(raw_err, self.json_output)
             success = err.code in self.allowed_status

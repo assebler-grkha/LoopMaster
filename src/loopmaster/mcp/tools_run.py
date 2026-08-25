@@ -19,7 +19,12 @@ from loopmaster.core.types import ErrorPolicy
 from loopmaster.core.types import LoopDef as LoopDefType
 from loopmaster.cost.tracker import CostTracker
 from loopmaster.llm import LLMClient, get_llm_config
-from loopmaster.mcp.discovery import find_loop_files, load_loop_def, load_loop_def_object
+from loopmaster.mcp.discovery import (
+    find_loop_files,
+    inspect_loop_file,
+    load_loop_def,
+    load_loop_def_object,
+)
 from loopmaster.mcp.runtime import mcp
 from loopmaster.mcp.store_models import TERMINAL_STATUSES
 from loopmaster.mcp.tools_blocks import validate_code_refs
@@ -192,12 +197,17 @@ def loop_record(
 def _find_target_loop_def(
     loop_name: str, search_dir: str | None
 ) -> tuple[Path | None, LoopDefType | None]:
-    """Find the target loop definition object by name."""
+    """Find the target loop definition object by name.
+
+    Candidates are narrowed via AST metadata; only the matching module is
+    imported (executed) — enumeration itself never runs workspace code.
+    """
     search = Path(search_dir) if search_dir else None
     for f in find_loop_files(search):
-        ldef = load_loop_def_object(f)
-        if ldef and ldef.name == loop_name:
-            return f, ldef
+        meta = inspect_loop_file(f)
+        if meta is None or meta["name"] != loop_name:
+            continue
+        return f, load_loop_def_object(f)
     return None, None
 
 
@@ -327,11 +337,21 @@ def loop_run(
     except Exception as exc:
         return json.dumps({"error": f"Invalid context JSON: {exc}"})
 
+    # Policy hooks must gate the legacy DSL path the same way as spec_json.
+    definition = load_loop_def(target_file) or {"name": loop_name}
+    try:
+        hooks.trigger(
+            hooks.BEFORE_LOOP_RUN,
+            {"spec": {"name": loop_name, "steps": definition.get("steps", [])}, "store": rt.store},
+        )
+    except hooks.HookVeto as exc:
+        return json.dumps({"error": f"rejected by hook: {exc}"})
+
     job_id = f"{loop_name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     rt.store.create_job(
         job_id=job_id,
         loop_name=loop_name,
-        definition=load_loop_def(target_file) or {"name": loop_name},
+        definition=definition,
         status="running",
         metrics={"host_pid": os.getpid()},
     )

@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,11 @@ class NotificationStoreMixin(StoreHost):
         payload = [row_to_notification(row).to_dict() for row in rows]
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            if path.exists():
+                path.chmod(0o600)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False, indent=2))
         except OSError as exc:
             logger.warning("critical fallback write failed (%s): %s", path, exc)
 

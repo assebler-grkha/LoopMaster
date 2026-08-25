@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 from fastmcp import FastMCP
@@ -28,4 +29,17 @@ runner = DetachedRunner(store)
 cancel_events: dict[str, threading.Event] = {}
 
 register_builtins()
-_user_hooks_loaded = _hooks.load_user_hooks()
+
+# User hooks execute arbitrary code from the workspace; loading them is an
+# explicit opt-in so a cloned repo cannot gain code execution just by being
+# opened in the agent's CWD.
+_user_hooks_loaded = 0
+if os.environ.get("LOOPMASTER_LOAD_HOOKS", "").strip().lower() in ("1", "true", "yes"):
+    _user_hooks_loaded = _hooks.load_user_hooks()
+    if _user_hooks_loaded:
+        import logging
+
+        logging.getLogger("loopmaster.mcp.runtime").warning(
+            "Loaded %d user hook(s) from .loopmaster/hooks.py (LOOPMASTER_LOAD_HOOKS is enabled)",
+            _user_hooks_loaded,
+        )

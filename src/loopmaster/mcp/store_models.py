@@ -25,7 +25,7 @@ _CAPABILITY_RE = re.compile(r"^net$|^fs:(read|write):.+$")
 _CODE_REF_RE = re.compile(r"^[a-z][a-z0-9-]*@\d+\.\d+\.\d+$")
 _CODE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-_POISON_REF_RE = re.compile(r"\{[a-zA-Z_]\w*\}")
+_POISON_REF_RE = re.compile(r"\{\{?[a-zA-Z_][\w\.]*\}?\}")
 _DURATION_RE = re.compile(r"(\d+)([smhd])")
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -77,11 +77,12 @@ def is_pid_alive(pid: int | None) -> bool:
         import ctypes
 
         process_query_limited_information = 0x1000
+        error_access_denied = 5
         handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, 0, pid)
         if handle:
             ctypes.windll.kernel32.CloseHandle(handle)
             return True
-        return False
+        return ctypes.windll.kernel32.GetLastError() == error_access_denied
     try:
         os.kill(pid, 0)
         return True

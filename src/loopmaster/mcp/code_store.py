@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 
@@ -17,6 +18,8 @@ from loopmaster.mcp.store_models import (
     _split_block_ref,
     row_to_code_block,
 )
+
+_ENTRYPOINT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class CodeBlockStoreMixin(StoreHost):
@@ -44,6 +47,12 @@ class CodeBlockStoreMixin(StoreHost):
             )
         if not isinstance(source, str) or not source.strip():
             raise ValueError("source must be a non-empty string")
+        entrypoint = entrypoint or "main"
+        if not isinstance(entrypoint, str) or not _ENTRYPOINT_RE.match(entrypoint):
+            raise ValueError(
+                f"invalid entrypoint {entrypoint!r} "
+                "(expected a bare filename stem: letters/digits/._-, no path separators)"
+            )
         caps = [str(c) for c in (capabilities or [])]
         for cap in caps:
             if not _CAPABILITY_RE.match(cap):

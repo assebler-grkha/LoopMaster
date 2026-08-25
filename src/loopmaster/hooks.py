@@ -76,6 +76,27 @@ def clear() -> None:
         _registry.clear()
 
 
+def ensure_builtins() -> None:
+    """Idempotently register built-in policy hooks from any entrypoint.
+
+    ``register`` replaces by name, so calling this repeatedly is safe. Every
+    execution surface (MCP tools, CLI run) must call this before firing
+    BEFORE_LOOP_* events, otherwise org policy silently does not apply.
+    """
+    from loopmaster.hooks_builtin import register_builtins
+
+    register_builtins()
+
+
+def fire_before_loop_run(payload: dict | None = None) -> None:
+    """Policy chokepoint: ensure builtins exist, then trigger BEFORE_LOOP_RUN.
+
+    Raises :class:`HookVeto` when any hook rejects the operation.
+    """
+    ensure_builtins()
+    trigger(BEFORE_LOOP_RUN, payload)
+
+
 def trigger(event: str, payload: dict | None = None) -> list[dict]:
     """Run all hooks for ``event``; returns per-hook result dicts.
 

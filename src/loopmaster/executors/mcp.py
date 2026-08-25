@@ -5,15 +5,15 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import os
 import shlex
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import BaseExecutor, resolve_template_value
+from .base import BaseExecutor, build_minimal_env, resolve_template_value
 
 logger = logging.getLogger("loopmaster.executors.mcp")
 
@@ -55,6 +55,40 @@ def _extract_text_content(content_list: list[Any]) -> str:
     return "\n".join(texts)
 
 
+def _readline_capped(stream: Any, limit: int = 1024 * 1024) -> str:
+    """Read one NDJSON line with a hard character cap (unbounded readline = OOM risk)."""
+    line = stream.readline(limit + 1)
+    if not line:
+        return ""
+    if len(line) > limit:
+        raise ValueError(f"MCP response line exceeded {limit} characters")
+    return line
+
+
+def _read_response(proc: subprocess.Popen[str], expected_id: int) -> dict[str, Any] | None:
+    """Read the next JSON-RPC response whose id matches; skip notifications.
+
+    Returns ``None`` on EOF. Malformed lines are skipped (bounded count).
+    """
+    assert proc.stdout
+    for _ in range(1000):
+        try:
+            line = _readline_capped(proc.stdout)
+        except ValueError as exc:
+            logger.warning("MCP response too large: %s", exc)
+            return None
+        if not line:
+            return None
+        try:
+            data = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("id") == expected_id:
+            return data
+    logger.warning("MCP server sent no matching response for id=%s", expected_id)
+    return None
+
+
 def _mcp_handshake(proc: subprocess.Popen[str]) -> str | None:
     """Perform MCP initialize handshake. Returns error message if failed."""
     assert proc.stdin and proc.stdout
@@ -71,8 +105,8 @@ def _mcp_handshake(proc: subprocess.Popen[str]) -> str | None:
     proc.stdin.write(json.dumps(init_req) + "\n")
     proc.stdin.flush()
 
-    resp_line = proc.stdout.readline()
-    if not resp_line:
+    resp = _read_response(proc, expected_id=1)
+    if resp is None:
         return "MCP server exited before initialize response"
 
     init_notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
@@ -95,8 +129,8 @@ def _mcp_call_tool(
     proc.stdin.write(json.dumps(call_req) + "\n")
     proc.stdin.flush()
 
-    call_resp_line = proc.stdout.readline()
-    if not call_resp_line:
+    resp_data = _read_response(proc, expected_id=2)
+    if resp_data is None:
         return MCPToolResult(
             content=[],
             text="",
@@ -104,8 +138,6 @@ def _mcp_call_tool(
             success=False,
             error="MCP server exited before tool response",
         )
-
-    resp_data = json.loads(call_resp_line.strip())
     if "error" in resp_data:
         err_msg = resp_data["error"].get("message", str(resp_data["error"]))
         return MCPToolResult(content=[], text="", is_error=True, success=False, error=err_msg)
@@ -161,7 +193,7 @@ class MCPToolExecutor(BaseExecutor):
 
     def _execute_mcp_exchange(self, resolved_args: dict[str, Any]) -> MCPToolResult:
         cmd_args = self._build_command()
-        custom_env = dict(os.environ)
+        custom_env = build_minimal_env(allow=list(self.env or {}))
         if self.env:
             custom_env.update(self.env)
 
@@ -177,26 +209,42 @@ class MCPToolExecutor(BaseExecutor):
             errors="replace",
         )
 
-        import concurrent.futures
+        holder: dict[str, MCPToolResult] = {}
 
-        def _run() -> MCPToolResult:
+        def _run() -> None:
             err = _mcp_handshake(proc)
             if err:
-                return MCPToolResult(content=[], text="", is_error=True, success=False, error=err)
-            return _mcp_call_tool(proc, self.tool_name, resolved_args)
+                holder["result"] = MCPToolResult(
+                    content=[], text="", is_error=True, success=False, error=err
+                )
+                return
+            holder["result"] = _mcp_call_tool(proc, self.tool_name, resolved_args)
 
+        # Daemon thread + explicit timeout: a server blocked mid-readline must
+        # not pin the worker past the deadline. The finally-branch terminates
+        # the process, which unblocks the reader and lets the thread exit.
+        reader = threading.Thread(target=_run, daemon=True)
+        reader.start()
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(_run)
-                return future.result(timeout=self.timeout)
-        except concurrent.futures.TimeoutError:
-            return MCPToolResult(
-                content=[],
-                text="",
-                is_error=True,
-                success=False,
-                error=f"MCP invocation timed out after {self.timeout}s",
-            )
+            reader.join(self.timeout)
+            if reader.is_alive():
+                return MCPToolResult(
+                    content=[],
+                    text="",
+                    is_error=True,
+                    success=False,
+                    error=f"MCP invocation timed out after {self.timeout}s",
+                )
+            result = holder.get("result")
+            if result is None:
+                return MCPToolResult(
+                    content=[],
+                    text="",
+                    is_error=True,
+                    success=False,
+                    error=f"MCP invocation timed out after {self.timeout}s",
+                )
+            return result
         except Exception as exc:
             return MCPToolResult(
                 content=[],

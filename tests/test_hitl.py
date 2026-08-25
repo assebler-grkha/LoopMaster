@@ -339,6 +339,11 @@ class TestRespondJobGuard:
     def test_respond_accepts_matching_job_id(self, store, monkeypatch):
         monkeypatch.setattr(rt, "store", store)
         msg = store.create_question("j1", "loop:d#ask", text="Q?")
-        out = loop_respond(job_id="j1", msg_id=msg.msg_id, answer="yes")
+        out = loop_respond(
+            job_id="j1",
+            msg_id=msg.msg_id,
+            answer="yes",
+            nonce=msg.payload.get("nonce", ""),
+        )
         assert '"responded": true' in out
         assert store.get_message(msg.msg_id).status == "answered"

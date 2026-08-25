@@ -109,8 +109,8 @@ class CodeBlockExecutor(BaseExecutor):
     def _load_block(self) -> tuple[Any | None, str | None]:
         try:
             block = self._get_store().get_code_block(self.ref)
-        except Exception as exc:  # pragma: no cover - defensive
-            return None, f"failed to load code block '{self.ref}': {exc}"
+        except Exception:  # pragma: no cover - defensive
+            return None, f"failed to load code block '{self.ref}' (store error)"
         if block is None:
             return None, f"unknown code block '{self.ref}'"
         if self.sha256 and block.sha256 != self.sha256:
@@ -134,6 +134,8 @@ class CodeBlockExecutor(BaseExecutor):
         target_dir = self._cache_root / digest
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / filename
+        if not target.resolve().is_relative_to(target_dir.resolve()):
+            raise ValueError(f"entrypoint escapes the block cache directory: {filename!r}")
         if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
             target.write_text(source, encoding="utf-8")
         return target_dir
@@ -147,9 +149,16 @@ class CodeBlockExecutor(BaseExecutor):
     @staticmethod
     def _command_for(block: Any, script_dir: Path) -> list[str]:
         if block.language == "python":
-            script = script_dir / f"{block.entrypoint}.py"
+            script = (script_dir / f"{block.entrypoint}.py").resolve()
+            if not script.is_relative_to(script_dir.resolve()):
+                raise ValueError(
+                    f"entrypoint escapes the block cache directory: {block.entrypoint!r}"
+                )
             return [sys.executable, str(script)]
-        return ["bash", "-e", str(script_dir / block.entrypoint)]
+        script = (script_dir / block.entrypoint).resolve()
+        if not script.is_relative_to(script_dir.resolve()):
+            raise ValueError(f"entrypoint escapes the block cache directory: {block.entrypoint!r}")
+        return ["bash", "-e", str(script)]
 
     @staticmethod
     def _drain(stream: Any, limit: int) -> tuple[str, bool]:
@@ -324,12 +333,15 @@ class CodeBlockExecutor(BaseExecutor):
             "context": ctx_data,
         }
 
-        script_dir = self._extract(
-            block.source,
-            hashlib.sha256(block.source.encode("utf-8")).hexdigest(),
-            self._script_name(block.language, getattr(block, "entrypoint", "main")),
-        )
-        cmd = self._command_for(block, script_dir)
+        try:
+            script_dir = self._extract(
+                block.source,
+                hashlib.sha256(block.source.encode("utf-8")).hexdigest(),
+                self._script_name(block.language, getattr(block, "entrypoint", "main")),
+            )
+            cmd = self._command_for(block, script_dir)
+        except ValueError as exc:
+            return CodeBlockResult(error=str(exc))
 
         outcome = self._run_subprocess(cmd, script_dir, payload)
         if isinstance(outcome, CodeBlockResult):

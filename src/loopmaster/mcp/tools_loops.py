@@ -15,6 +15,7 @@ from loopmaster.mcp.discovery import (
 )
 from loopmaster.mcp.discovery import (
     find_loop_files,
+    inspect_loop_file,
     load_loop_def,
 )
 from loopmaster.mcp.discovery import (
@@ -36,7 +37,9 @@ def loop_list(search_dir: str | None = None) -> str:
     """Discover available LoopMaster loops.
 
     Scans the current directory (and optional search_dir) for Python files
-    containing @Loop decorators. Returns loop names, versions, and step counts.
+    defining @Loop decorators. Metadata is extracted via AST analysis —
+    candidate modules are parsed, never executed. Returns loop names,
+    versions, and descriptions.
     """
     search = Path(search_dir) if search_dir else None
     files = find_loop_files(search)
@@ -45,15 +48,12 @@ def loop_list(search_dir: str | None = None) -> str:
 
     lines = [f"Found {len(files)} loop(s):"]
     for f in files:
-        info = load_loop_def(f)
-        if info:
-            budget = f" | budget: {info['budget']}" if "budget" in info else ""
-            count = info["step_count"]
-            lines.append(
-                f"  - {info['name']} v{info['version']} ({count} steps{budget}) [{f.name}]"
-            )
+        meta = inspect_loop_file(f)
+        if meta:
+            desc = f" | {meta['description']}" if "description" in meta else ""
+            lines.append(f"  - {meta['name']} v{meta['version']}{desc} [{f.name}]")
         else:
-            lines.append(f"  - {f.name} (could not load)")
+            lines.append(f"  - {f.name} (no @Loop found)")
     return "\n".join(lines)
 
 
@@ -67,14 +67,24 @@ def loop_get(loop_name: str, search_dir: str | None = None) -> str:
     search = Path(search_dir) if search_dir else None
     files = find_loop_files(search)
 
+    # Resolve the matching file via AST metadata first, then import only that
+    # one module — enumeration must not execute workspace code.
+    target = None
     for f in files:
-        info = load_loop_def(f)
-        if info and info["name"] == loop_name:
-            job_id = f"{loop_name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-            rt.store.create_job(job_id=job_id, loop_name=loop_name, definition=info)
-            return json.dumps(with_pending({"job_id": job_id, "loop": info}), indent=2)
+        meta = inspect_loop_file(f)
+        if meta and meta["name"] == loop_name:
+            target = f
+            break
 
-    return f"Error: Loop '{loop_name}' not found."
+    if target is None:
+        return f"Error: Loop '{loop_name}' not found."
+
+    info = load_loop_def(target)
+    if info is None:
+        return f"Error: Loop '{loop_name}' could not be loaded from {target.name}."
+    job_id = f"{loop_name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    rt.store.create_job(job_id=job_id, loop_name=loop_name, definition=info)
+    return json.dumps(with_pending({"job_id": job_id, "loop": info}), indent=2)
 
 
 @mcp.tool()
@@ -187,7 +197,9 @@ def loop_status(job_id: str) -> str:
     if job.error:
         payload["error"] = job.error
     if job.metrics:
-        payload["metrics"] = job.metrics
+        sanitized = {k: v for k, v in job.metrics.items() if k != "host_pid"}
+        if sanitized:
+            payload["metrics"] = sanitized
     if job.status == "waiting_input":
         payload["questions"] = [_question_view(m) for m in rt.store.list_questions(job_id=job_id)]
         payload["message"] = (

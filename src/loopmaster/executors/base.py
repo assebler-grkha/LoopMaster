@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 from abc import ABC, abstractmethod
 from typing import Any
 
 _TEMPLATE_PATTERN = re.compile(r"\{\{?([a-zA-Z_][\w\.]*)\}?\}")
+
+
+def build_minimal_env(allow: list[str] | None = None) -> dict[str, str]:
+    """Minimal child-process environment: OS plumbing plus explicitly allowed names.
+
+    Prevents wholesale host-env inheritance (API keys, cloud credentials) from
+    leaking into every subprocess spawned by shell/mcp/code executors.
+    """
+    keys = ["PATH", "PYTHONIOENCODING"]
+    if sys.platform == "win32":
+        keys += ["SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "PATHEXT"]
+    else:
+        keys += ["HOME", "TMPDIR", "LANG"]
+    env = {k: os.environ[k] for k in keys if k in os.environ}
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    for name in allow or []:
+        if name in os.environ:
+            env[name] = os.environ[name]
+    return env
 
 
 def resolve_path_value(path: str, ctx_data: dict[str, Any]) -> Any:

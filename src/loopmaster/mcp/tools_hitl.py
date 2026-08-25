@@ -21,6 +21,7 @@ def _question_view(message: MessageData) -> dict[str, Any]:
         "text": (message.payload or {}).get("text", ""),
         "options": (message.payload or {}).get("options", []),
         "default_answer": (message.payload or {}).get("default_answer"),
+        "nonce": (message.payload or {}).get("nonce", ""),
         "created_at": message.created_at,
         "expires_at": message.expires_at,
     }
@@ -39,16 +40,30 @@ def loop_questions(job_id: str | None = None) -> str:
         return f"Error listing questions: {exc}"
 
 
-@mcp.tool()
-def loop_respond(job_id: str, msg_id: str, answer) -> str:
-    """Answer a pending HITL question so the waiting loop can resume."""
+MAX_ANSWER_BYTES = 64 * 1024
 
+
+@mcp.tool()
+def loop_respond(job_id: str, msg_id: str, answer, nonce: str = "") -> str:
+    """Answer a pending HITL question so the waiting loop can resume.
+
+    The ``nonce`` is returned per-question by loop_questions and is required.
+    """
     try:
         existing = rt.store.get_message(msg_id)
         if existing is None:
             return f"Error: Message '{msg_id}' not found."
         if existing.job_id != job_id:
             return f"Error: msg_id '{msg_id}' belongs to job '{existing.job_id}', not '{job_id}'."
+        expected_nonce = (existing.payload or {}).get("nonce", "")
+        if not nonce or nonce != expected_nonce:
+            return "Error: invalid or missing nonce — fetch it via loop_questions."
+        try:
+            answer_size = len(json.dumps(answer, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            return "Error: answer is not JSON-serializable."
+        if answer_size > MAX_ANSWER_BYTES:
+            return f"Error: answer exceeds the {MAX_ANSWER_BYTES}-byte limit."
         message = rt.store.answer_question(msg_id, answer, by="agent")
         with contextlib.suppress(Exception):
             rt.store.mark_job_notifications_read(message.job_id, event="waiting_input")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import time
 from typing import Any
 
@@ -47,9 +48,10 @@ class MessageStoreMixin(StoreHost):
         for opt in options or []:
             self._guard_poison_refs([str(opt)])
         msg_id = hashlib.sha256(f"{job_id}|{from_addr}".encode()).hexdigest()
+        nonce = secrets.token_hex(8)
         now = time.time()
         expires_at = (now + timeout_s) if timeout_s else None
-        payload = {"text": str(text), "options": list(options or [])}
+        payload = {"text": str(text), "options": list(options or []), "nonce": nonce}
         if default_answer is not None:
             payload["default_answer"] = default_answer
         with self._lock:

@@ -18,6 +18,12 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(blocks_app, name="block", help="Manage reusable code blocks.")
+
+from loopmaster.cli.ops import hooks_list, maintenance, skills  # noqa: E402
+
+app.command("hooks")(hooks_list)
+app.command()(maintenance)
+app.command()(skills)
 console = Console()
 
 
@@ -127,6 +133,24 @@ def _load_checkpoint(loop_name: str):
     return checkpoint
 
 
+def _fire_run_policy(loop_def, spec_steps: list | None = None) -> None:
+    """Run policy hooks for a CLI execution (same chokepoint as MCP path)."""
+
+    from loopmaster import hooks
+    from loopmaster.mcp.job_store import get_job_store
+
+    spec_payload: dict = {"name": loop_def.name}
+    if loop_def.budget:
+        spec_payload["budget"] = loop_def.budget.to_dict()
+    if spec_steps is not None:
+        spec_payload["steps"] = spec_steps
+    try:
+        hooks.fire_before_loop_run({"spec": spec_payload, "store": get_job_store()})
+    except hooks.HookVeto as exc:
+        console.print(f"[red]Rejected by hook:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
 def _run_json_file(loop_file: str, dry_run: bool) -> None:
     from loopmaster.core.engine import LoopEngine
 
@@ -134,6 +158,21 @@ def _run_json_file(loop_file: str, dry_run: bool) -> None:
     if dry_run:
         print_json_plan(loop_def, spec)
         return
+    try:
+        import json as _json
+
+        raw_spec = _json.loads(Path(loop_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw_spec = None
+    if isinstance(raw_spec, dict):
+        from loopmaster import hooks as _hooks_mod
+        from loopmaster.mcp.job_store import get_job_store
+
+        try:
+            _hooks_mod.fire_before_loop_run({"spec": raw_spec, "store": get_job_store()})
+        except _hooks_mod.HookVeto as exc:
+            console.print(f"[red]Rejected by hook:[/red] {exc}")
+            raise typer.Exit(1) from exc
     engine = LoopEngine()
     engine.register(loop_def)
     console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
@@ -160,6 +199,12 @@ def _run_python_file(loop_file: str, resume: bool, dry_run: bool) -> None:
         return
 
     checkpoint = _load_checkpoint(loop_def.name) if resume else None
+    from loopmaster.mcp.discovery import loop_def_to_dict
+
+    _fire_run_policy(
+        loop_def,
+        loop_def_to_dict(loop_def, Path(loop_file)).get("steps"),
+    )
     console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
     result = _run_with_progress(engine, loop_def, {}, resume_checkpoint=checkpoint)
     _print_run_result(result)
@@ -346,69 +391,6 @@ def _open_in_browser(docs_dir: Path) -> None:
 def main() -> None:
     """Entry point for the CLI."""
     app()
-
-
-@app.command("hooks")
-def hooks_list() -> None:
-    """List registered lifecycle hooks."""
-    from loopmaster import hooks
-
-    registry = hooks.get_registry()
-    if not any(registry.values()):
-        console.print("[yellow]No hooks registered[/yellow]")
-        return
-
-    table = Table(title="Registered Hooks")
-    table.add_column("Event")
-    table.add_column("Hooks")
-
-    for event, names in sorted(registry.items()):
-        if names:
-            table.add_row(event, ", ".join(names))
-    console.print(table)
-
-
-@app.command()
-def maintenance() -> None:
-    """Run store maintenance: stale reaper + archive sweeper."""
-    from loopmaster import hooks_builtin
-    from loopmaster.mcp.job_store import get_job_store
-
-    store = get_job_store()
-    reaped = hooks_builtin.h_stale_reaper(store)
-    swept = hooks_builtin.h_archive_sweeper(store)
-    console.print(f"[green]Interrupted stale jobs:[/green] {reaped}")
-    console.print(f"[green]Swept notifications archived:[/green] {swept}")
-
-
-@app.command()
-def skills(
-    install: bool = typer.Option(False, "--install", help="Install skills into target directory"),
-    target: str = typer.Option(".opencode/skill", "--target", help="Installation target dir"),
-) -> None:
-    """List or install bundled agent skills (S1-S9)."""
-    skills_dir = Path(__file__).resolve().parent.parent.parent.parent / "skills"
-    if not skills_dir.exists():
-        console.print("[red]Error:[/red] skills directory not found")
-        raise typer.Exit(1)
-
-    packs = sorted(p for p in skills_dir.iterdir() if (p / "SKILL.md").exists())
-    if not install:
-        for p in packs:
-            console.print(f"[cyan]{p.name}[/cyan]")
-        return
-
-    target_dir = Path(target)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    installed = 0
-    for p in packs:
-        dest = target_dir / p.name
-        dest.mkdir(parents=True, exist_ok=True)
-        (dest / "SKILL.md").write_text(
-            (p / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        installed += 1
-    console.print(f"[green]Installed {installed} skill(s) into {target_dir}[/green]")
 
 
 if __name__ == "__main__":

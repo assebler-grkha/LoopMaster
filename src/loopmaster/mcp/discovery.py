@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import logging
 import os
@@ -12,9 +13,102 @@ from loopmaster.core.types import LoopDef as LoopDefType
 
 logger = logging.getLogger("loopmaster.mcp.discovery")
 
+_parse_cache: dict[str, tuple[float, int, ast.Module | None]] = {}
+
+
+def _cached_tree(py_file: Path) -> ast.Module | None:
+    """Parse ``py_file`` into an AST, memoized by (mtime, size). Never executes."""
+    try:
+        st = py_file.stat()
+    except OSError as exc:
+        logger.debug("Cannot stat %s: %s", py_file, exc)
+        return None
+    key = str(py_file.resolve())
+    cached = _parse_cache.get(key)
+    if cached is not None and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2]
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError) as exc:
+        logger.debug("Skipping unparseable file %s: %s", py_file, exc)
+        tree = None
+    _parse_cache[key] = (st.st_mtime, st.st_size, tree)
+    return tree
+
+
+def _is_loop_decorator(dec: ast.expr) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    name = getattr(target, "attr", None) or getattr(target, "id", "")
+    return name == "Loop"
+
+
+_LOOP_CONST_FIELDS = ("name", "version")
+
+
+def inspect_loop_file(py_file: Path) -> dict[str, Any] | None:
+    """Extract loop metadata via AST analysis WITHOUT executing the module.
+
+    Returns ``{"name": ..., "version": ..., "description": ...}`` for the first
+    ``@Loop``-decorated function, or ``None`` when nothing is found/parsable.
+    """
+    tree = _cached_tree(py_file)
+    if tree is None:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not _is_loop_decorator(dec):
+                continue
+            meta: dict[str, Any] = {}
+            if isinstance(dec, ast.Call):
+                pos = [
+                    arg.value
+                    for arg in dec.args[: len(_LOOP_CONST_FIELDS)]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                ]
+                for idx, field in enumerate(_LOOP_CONST_FIELDS):
+                    if idx < len(pos):
+                        meta[field] = pos[idx]
+                for kw in dec.keywords:
+                    if (
+                        kw.arg in _LOOP_CONST_FIELDS
+                        and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, str)
+                    ):
+                        meta[kw.arg] = kw.value.value
+            if "name" not in meta:
+                meta["name"] = node.name
+            meta.setdefault("version", "0.0.0")
+            doc = ast.get_docstring(node)
+            if doc:
+                meta["description"] = doc.strip().splitlines()[0]
+            return meta
+    return None
+
+
+def _module_uses_loops(tree: ast.Module) -> bool:
+    """True when the module plausibly defines loops (@Loop or LoopDef usage)."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = getattr(node, "module", "") or ""
+            names = [a.name for a in node.names]
+            if node.__class__.__name__ == "ImportFrom" and module.startswith("loopmaster"):
+                return True
+            if node.__class__.__name__ == "Import" and any(
+                n.startswith("loopmaster") for n in names
+            ):
+                return True
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, "attr", None) or getattr(fn, "id", "")
+            if name in ("Loop", "LoopDef"):
+                return True
+    return False
+
 
 def find_loop_files(search_dir: Path | None = None) -> list[Path]:
-    """Find .py files containing @Loop decorators."""
+    """Find .py files defining loops, using AST parsing only (no code execution)."""
     dirs = []
     if search_dir and search_dir.is_dir():
         dirs.append(search_dir)
@@ -37,12 +131,9 @@ def find_loop_files(search_dir: Path | None = None) -> list[Path]:
             if any(part in skip_dirs for part in py_file.parts):
                 continue
             seen.add(py_file)
-            try:
-                content = py_file.read_text(encoding="utf-8")
-                if "@Loop" in content or "from loopmaster" in content:
-                    results.append(py_file)
-            except (OSError, UnicodeDecodeError) as exc:
-                logger.debug("Skipping unreadable file %s: %s", py_file, exc)
+            tree = _cached_tree(py_file)
+            if tree is not None and _module_uses_loops(tree):
+                results.append(py_file)
     return results
 
 
