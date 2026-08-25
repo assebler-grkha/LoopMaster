@@ -45,7 +45,7 @@ def wait_terminal(store, job_id: str, timeout: float = 10.0) -> Any:
     deadline = time.time() + timeout
     while time.time() < deadline:
         job = store.get_job(job_id)
-        if job.status in ("completed", "failed", "error", "interrupted"):
+        if job.status in ("completed", "failed", "error", "interrupted", "cancelled"):
             return job
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} did not reach terminal state")
@@ -154,3 +154,77 @@ class TestNormalizeOutput:
 
     def test_plain_value_passthrough(self):
         assert _normalize_output({"k": 1}) == {"k": 1}
+
+
+SHELL_SLOW = {
+    "loopmaster": "1.0",
+    "name": "worker-slow",
+    "version": "1.0.0",
+    "steps": [
+        {
+            "type": "shell",
+            "name": "wait",
+            "command": ["python", "-c", "import time; time.sleep(3)"],
+        },
+    ],
+}
+
+
+class TestAdversarialFixes:
+    def test_default_factory_sets_checkpoint_dir(self, tmp_path):
+        import threading
+
+        from loopmaster.mcp.worker import DEFAULT_CHECKPOINT_DIR, _default_engine_factory
+
+        cps = str(tmp_path / "cps")
+        engine = _default_engine_factory(threading.Event(), checkpoint_dir=cps)
+        assert engine.checkpoint_dir == cps
+        assert DEFAULT_CHECKPOINT_DIR == ".loopmaster/checkpoints"
+
+    def test_runner_uses_checkpoint_dir(self, store, tmp_path):
+        cps = tmp_path / "cps"
+        runner = DetachedRunner(store, checkpoint_dir=str(cps))
+        loop_def, _spec = load_loop_from_dict(SHELL_OK)
+        job_id = runner.submit(loop_def)
+        wait_terminal(store, job_id)
+        assert cps.exists(), "engine must persist checkpoints to the configured dir"
+
+    def test_submit_refuses_live_lease(self, store, runner):
+        loop_def, _spec = load_loop_from_dict(SHELL_SLOW)
+        job_id = runner.submit(loop_def)
+        time.sleep(0.2)
+        again, _spec2 = load_loop_from_dict(SHELL_SLOW)
+        with pytest.raises(ValueError, match="already running"):
+            runner.submit(again, job_id=job_id)
+        store.cancel_job(job_id)
+
+    def test_cross_process_cancel_wins_over_worker(self, store):
+        two_step = {
+            "loopmaster": "1.0",
+            "name": "worker-cancel-race",
+            "version": "1.0.0",
+            "steps": [
+                {"type": "shell", "name": "one", "command": "echo one"},
+                {
+                    "type": "shell",
+                    "name": "slow",
+                    "command": ["python", "-c", "import time; time.sleep(5)"],
+                },
+                {"type": "shell", "name": "never", "command": "echo never"},
+            ],
+        }
+        runner = DetachedRunner(store, poll_s=0.05)
+        loop_def, _spec = load_loop_from_dict(two_step)
+        job_id = runner.submit(loop_def)
+        time.sleep(0.5)
+        assert store.cancel_job(job_id) is True
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if not runner.is_running(job_id):
+                break
+            time.sleep(0.05)
+        job = store.get_job(job_id)
+        assert job.status == "cancelled"
+        assert "one" in job.results
+        assert "never" not in job.results

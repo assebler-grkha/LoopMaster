@@ -70,3 +70,31 @@ CREATE TABLE IF NOT EXISTS в `_init_schema` ок (WAL, busy_timeout=5000) + м�
 | Обязательно | A1, A2, A3, A6, A8, A10, A11, A14 |
 | Желательно | A4, A5, A12, A15 |
 | Справочно | A16 |
+
+---
+
+## Implementation status (verified against code, 2026-08-25)
+
+| # | Priority | Status | Where |
+|---|----------|--------|-------|
+| A1 placeholder validation | Must | **Done** | `spec/loader.py` `_check_template_refs` / `_walk_semantics` |
+| A2 condition AST whitelist | Must | **Done** | `spec/loader.py` `_condition_ast_error` (load-time rejection) |
+| A3 timeout -> executor ctor | Must | Already done (F1) | `loader.py` compiles `timeout=float(...)` into ShellExecutor/HTTPExecutor/MCPToolExecutor |
+| A4 Windows argv limit | Later (F3) | Deferred | code-block execution phase |
+| A5 typed block args schema | Later (F3) | Deferred | CodeBlockStore phase |
+| A6 `{step.stdout}` rule | Must | **Done** | loader rejects bare refs to shell/http/mcp outputs with hint |
+| A7 checkpoint_dir in MCP engine | Blocker | **Done** | `worker.py` `DEFAULT_CHECKPOINT_DIR` + default engine factory |
+| A8 question idempotency | Later (F4) | Deferred | HITL phase |
+| A9 stale-detector vs live worker | Blocker | **Done** | watcher heartbeat (`touch_job` every 60s keeps `updated_at` fresh) |
+| A10 conditional UPDATEs | Must | **Partial** | terminal-status guards in `update_job`/`record_step_result` (+ completed->completed finalize exception); full rowcount-guarded UPDATEs deferred to F4 |
+| A11 poison-SKIP guard | Later (F4) | Deferred | HITL phase |
+| A12 events table | Later (F5) | Deferred | notifications phase |
+| A13 worker lease | Blocker | **Done** | `DetachedRunner.submit` refuses active job on live host PID |
+| A14 DB-poll cancel | Must | **Done** | per-job watcher thread polls store, sets cancel_event on `cancelled` |
+| A15 user_version gating / no lock during sleep | Should | **Done** | `SCHEMA_VERSION` gate in `_init_schema`; watcher sleeps without holding locks |
+| A16 import cycles | Info | Confirmed none | - |
+
+Known limitation: `{placeholder}` references cannot contain hyphens (regex parity with runtime
+`resolve_prompt`); step names with `-` are not addressable from templates. Underscore names work.
+
+Tests: 20 new tests across test_spec_loader / test_worker / test_job_store cover A1/A2/A3/A6/A7/A9-A10/A13-A14/A15.

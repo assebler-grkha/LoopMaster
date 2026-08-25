@@ -185,3 +185,53 @@ class TestJobStoreConcurrency:
         assert job is not None
         assert len(job.results) == total_steps
         assert job.status == "completed"
+
+
+class TestAdversarialGuards:
+    def test_touch_job_bumps_running_job(self, tmp_path: Path):
+        store = JobStore(db_path=tmp_path / "t.db")
+        store.create_job("j-touch", "loop", {}, status="running")
+        before = store.get_job("j-touch").updated_at
+        assert store.touch_job("j-touch") is True
+        after = store.get_job("j-touch").updated_at
+        assert after >= before
+
+    def test_touch_job_skips_terminal(self, tmp_path: Path):
+        store = JobStore(db_path=tmp_path / "t.db")
+        store.create_job("j-done", "loop", {}, status="running")
+        store.update_job("j-done", status="completed", completed=True)
+        assert store.touch_job("j-done") is False
+
+    def test_update_blocked_on_terminal(self, tmp_path: Path):
+        store = JobStore(db_path=tmp_path / "t.db")
+        store.create_job("j-term", "loop", {}, status="running")
+        store.update_job("j-term", status="completed", completed=True)
+        result = store.update_job("j-term", status="running")
+        assert result is not None
+        assert result.status == "completed"
+
+    def test_record_step_blocked_on_cancelled(self, tmp_path: Path):
+        store = JobStore(db_path=tmp_path / "t.db")
+        store.create_job("j-cxl", "loop", {"step_count": 2}, status="running")
+        store.cancel_job("j-cxl")
+        result = store.record_step_result("j-cxl", "s1", success=True, output="x")
+        assert result is not None
+        assert result.status == "cancelled"
+        assert result.results == {}
+
+    def test_schema_version_pragma(self, tmp_path: Path):
+        from loopmaster.mcp.job_store import SCHEMA_VERSION
+
+        store = JobStore(db_path=tmp_path / "t.db")
+        cur = store.conn.cursor()
+        cur.execute("PRAGMA user_version;")
+        version = int(cur.fetchone()[0])
+        cur.close()
+        assert version == SCHEMA_VERSION
+
+    def test_is_pid_alive_guards_bad_input(self):
+        from loopmaster.mcp.job_store import is_pid_alive
+
+        assert is_pid_alive(None) is False
+        assert is_pid_alive(0) is False
+        assert is_pid_alive(-1) is False

@@ -15,6 +15,32 @@ from typing import Any
 
 logger = logging.getLogger("loopmaster.mcp.job_store")
 
+SCHEMA_VERSION = 1
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+ACTIVE_STATUSES = frozenset({"ready", "running", "in_progress"})
+
+
+def is_pid_alive(pid: int | None) -> bool:
+    """Check whether a process ID belongs to a live process."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
 
 @dataclass
 class JobData:
@@ -101,9 +127,13 @@ class JobStore:
         return self._conn
 
     def _init_schema(self) -> None:
-        """Initialize jobs table and indexes."""
+        """Initialize jobs table and indexes (gated by PRAGMA user_version)."""
         with self._lock:
             cur = self.conn.cursor()
+            cur.execute("PRAGMA user_version;")
+            if int(cur.fetchone()[0]) >= SCHEMA_VERSION:
+                cur.close()
+                return
             cur.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -133,6 +163,7 @@ class JobStore:
                 );
                 """
             )
+            cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             self.conn.commit()
             cur.close()
 
@@ -275,6 +306,11 @@ class JobStore:
             job = self.get_job(job_id)
             if not job:
                 return None
+            if job.status in TERMINAL_STATUSES and not (
+                job.status == "completed" and status == "completed"
+            ):
+                logger.debug("Job %s already terminal (%s); update skipped", job_id, job.status)
+                return job
 
             now = time.time()
             if status is not None:
@@ -330,6 +366,11 @@ class JobStore:
             job = self.get_job(job_id)
             if not job:
                 return None
+            if job.status in TERMINAL_STATUSES:
+                logger.debug(
+                    "Job %s already terminal (%s); step result skipped", job_id, job.status
+                )
+                return job
 
             now = time.time()
             job.results[step_name] = {
@@ -424,6 +465,20 @@ class JobStore:
             cur.close()
             return deleted
 
+    def touch_job(self, job_id: str) -> bool:
+        """Refresh updated_at for a non-terminal job (worker heartbeat)."""
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE jobs SET updated_at = ? WHERE job_id = ? "
+                "AND status IN ('ready', 'running', 'in_progress')",
+                (time.time(), job_id),
+            )
+            touched = cur.rowcount > 0
+            self.conn.commit()
+            cur.close()
+            return touched
+
     def _host_pid_alive(self, metrics_json: str | None) -> bool:
         """Check whether the job's owning host process is still alive."""
         if not metrics_json:
@@ -432,24 +487,7 @@ class JobStore:
             pid = json.loads(metrics_json).get("host_pid")
         except (json.JSONDecodeError, AttributeError):
             return False
-        if not isinstance(pid, int) or pid <= 0:
-            return False
-        if sys.platform == "win32":
-            import ctypes
-
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+        return is_pid_alive(pid)
 
     def mark_interrupted_jobs_on_startup(self) -> int:
         """Mark orphan 'running'/'in_progress' jobs as 'interrupted' on startup.

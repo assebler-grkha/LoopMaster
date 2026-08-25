@@ -13,14 +13,19 @@ from typing import Any
 from loopmaster.core.engine import LoopEngine
 from loopmaster.core.policies import ErrorPolicy, RecoveryAction
 from loopmaster.core.types import LoopDef
-from loopmaster.mcp.job_store import JobStore
+from loopmaster.mcp.job_store import ACTIVE_STATUSES, TERMINAL_STATUSES, JobStore, is_pid_alive
 
 logger = logging.getLogger("loopmaster.mcp.worker")
 
 EngineFactory = Callable[[threading.Event], LoopEngine]
 
+DEFAULT_CHECKPOINT_DIR = ".loopmaster/checkpoints"
 
-def _default_engine_factory(cancel_event: threading.Event) -> LoopEngine:
+
+def _default_engine_factory(
+    cancel_event: threading.Event,
+    checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR,
+) -> LoopEngine:
     """Build a LoopEngine with LLM support when config exists, shell-only otherwise."""
     llm_client = None
     try:
@@ -41,6 +46,7 @@ def _default_engine_factory(cancel_event: threading.Event) -> LoopEngine:
         metrics_collector=MetricsCollector(),
         llm_client=llm_client,
         cancel_event=cancel_event,
+        checkpoint_dir=checkpoint_dir,
     )
 
 
@@ -77,11 +83,23 @@ class DetachedRunner:
     requirement: when the host (e.g. opencode) exits, everything is gone.
     """
 
-    def __init__(self, store: JobStore, engine_factory: EngineFactory | None = None) -> None:
+    def __init__(
+        self,
+        store: JobStore,
+        engine_factory: EngineFactory | None = None,
+        checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR,
+        poll_s: float = 1.0,
+        heartbeat_s: float = 60.0,
+    ) -> None:
         self._store = store
         self._lock = threading.RLock()
         self._events: dict[str, threading.Event] = {}
-        self._engine_factory: EngineFactory = engine_factory or _default_engine_factory
+        self._checkpoint_dir = checkpoint_dir
+        self._poll_s = poll_s
+        self._heartbeat_s = heartbeat_s
+        self._engine_factory: EngineFactory = engine_factory or (
+            lambda cancel_event: _default_engine_factory(cancel_event, checkpoint_dir)
+        )
 
     def submit(
         self,
@@ -95,6 +113,12 @@ class DetachedRunner:
             job_id = f"{loop_def.name}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         steps = list(getattr(loop_def, "_collected_steps", None) or [])
         definition = definition or {"step_count": len(steps)}
+
+        existing = self._store.get_job(job_id)
+        if existing is not None and existing.status in ACTIVE_STATUSES:
+            lease_pid = (existing.metrics or {}).get("host_pid")
+            if is_pid_alive(lease_pid):
+                raise ValueError(f"job '{job_id}' already running on live host pid {lease_pid}")
 
         self._store.create_job(
             job_id=job_id,
@@ -132,6 +156,38 @@ class DetachedRunner:
         with self._lock:
             return job_id in self._events
 
+    def _watch_job(
+        self,
+        job_id: str,
+        cancel_event: threading.Event,
+        stop: threading.Event,
+    ) -> None:
+        """Poll JobStore for cross-process cancellation; emit heartbeats while active.
+
+        Never holds the store lock while sleeping, so concurrent MCP reads stay
+        unblocked. Heartbeats refresh updated_at so stale-detectors do not
+        misreport a live detached worker as dead.
+        """
+        next_beat = time.monotonic() + self._heartbeat_s
+        while not stop.wait(self._poll_s):
+            try:
+                job = self._store.get_job(job_id)
+            except Exception:
+                logger.debug("Watcher read failed for %s", job_id, exc_info=True)
+                continue
+            if job is None or job.status in TERMINAL_STATUSES:
+                return
+            if job.status == "cancelled":
+                cancel_event.set()
+                return
+            now = time.monotonic()
+            if now >= next_beat:
+                try:
+                    self._store.touch_job(job_id)
+                except Exception:
+                    logger.debug("Heartbeat failed for %s", job_id, exc_info=True)
+                next_beat = now + self._heartbeat_s
+
     def _run_job(
         self,
         job_id: str,
@@ -142,6 +198,14 @@ class DetachedRunner:
         started = time.time()
         engine = self._engine_factory(cancel_event)
         engine.on_step_complete(lambda result: self._on_step(job_id, result))
+        stop_watch = threading.Event()
+        watcher = threading.Thread(
+            target=self._watch_job,
+            args=(job_id, cancel_event, stop_watch),
+            name=f"lm-watch-{job_id}",
+            daemon=True,
+        )
+        watcher.start()
         try:
             run_result = engine.run(loop_def, initial_context=ctx_data, job_id=job_id)
         except Exception as exc:  # noqa: BLE001 - worker boundary must persist failures
@@ -180,6 +244,7 @@ class DetachedRunner:
                     completed=True,
                 )
         finally:
+            stop_watch.set()
             with self._lock:
                 self._events.pop(job_id, None)
 

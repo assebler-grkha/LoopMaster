@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -27,6 +28,30 @@ _RESERVED_PHASES = {
     "code": "Phase 3 (CodeBlockStore)",
     "human": "Phase 4 (HITL protocol)",
 }
+
+_PLACEHOLDER_RE = re.compile(r"\{\{?([a-zA-Z_][\w\.]*)\}?\}")
+_ALLOWED_COND_NODES = (
+    ast.Expression,
+    ast.Constant,
+    ast.Name,
+    ast.UnaryOp,
+    ast.BoolOp,
+    ast.Compare,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.Is,
+    ast.IsNot,
+    ast.In,
+    ast.NotIn,
+    ast.Load,
+)
 
 
 @dataclass
@@ -74,6 +99,9 @@ class SpecValidationError(Exception):
 def validate_loop_spec(data: Any) -> list[str]:
     """Validate a parsed spec dict. Returns a list of errors (empty = valid)."""
     errors: list[str] = _validate(data, "$")
+    if not errors and isinstance(data, dict):
+        known = {k: "context" for k in (data.get("context") or {})}
+        _walk_semantics(data.get("steps") or [], known, errors, "$.steps")
     return errors
 
 
@@ -106,6 +134,11 @@ def parse_loop_spec(data: Any, *, source_path: str | None = None) -> tuple[LoopS
                 seen.add(node.name)
 
     _check_names(steps)
+    if errors:
+        raise SpecValidationError(errors, source_path)
+
+    known = {k: "context" for k in (data.get("context") or {})}
+    _walk_semantics(data["steps"], known, errors, "$.steps")
     if errors:
         raise SpecValidationError(errors, source_path)
 
@@ -367,6 +400,111 @@ def _check_positive_number(node: dict[str, Any], key: str, at: str, errors: list
     val = node.get(key)
     if key in node and (not isinstance(val, (int, float)) or val <= 0):
         _err(errors, at, f"'{key}' must be a positive number")
+
+
+def _condition_ast_error(condition: str) -> str | None:
+    """Return an error message if a condition is outside the AST whitelist.
+
+    Placeholders ({var}) are substituted with literal stubs before parsing
+    because resolve_prompt replaces them with values prior to evaluation.
+    """
+    probe = _PLACEHOLDER_RE.sub("'0'", condition.strip())
+    try:
+        tree = ast.parse(probe, mode="eval")
+    except SyntaxError as exc:
+        return f"syntax error: {exc.msg}"
+    for sub in ast.walk(tree):
+        if not isinstance(sub, _ALLOWED_COND_NODES):
+            return (
+                f"disallowed construct '{type(sub).__name__}' "
+                f"(only comparisons, and/or/not, names and literals are allowed)"
+            )
+    return None
+
+
+def _check_template_refs(template: str, known: dict[str, str], at: str, errors: list[str]) -> None:
+    """Validate {placeholder} references against known sources (A1/A6)."""
+    for match in _PLACEHOLDER_RE.finditer(template):
+        ref = match.group(1)
+        root, _, leaf = ref.partition(".")
+        src_type = known.get(root)
+        if src_type is None:
+            _err(
+                errors,
+                at,
+                f"unknown placeholder {{{ref}}} — no context key or preceding step named '{root}'",
+            )
+        elif src_type in ("shell", "http", "mcp") and not leaf:
+            _err(
+                errors,
+                at,
+                f"{{{ref}}} resolves to a raw result object; use '{{{ref}.stdout}}'",
+            )
+
+
+def _walk_semantics(
+    nodes: list[Any],
+    known: dict[str, str],
+    errors: list[str],
+    prefix: str,
+) -> dict[str, str]:
+    """Validate placeholder refs and conditions against declaration order.
+
+    ``known`` maps names to their output kind ("context", "llm", "shell",
+    "http", "mcp", "branch"). Returns the mapping of step names registered
+    at this level (merged into ``known`` as walking progresses).
+    """
+    registered: dict[str, str] = {}
+    for i, node in enumerate(nodes):
+        at = f"{prefix}[{i}]"
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type")
+        name = node.get("name")
+
+        if ntype == "llm":
+            prompt = node.get("prompt")
+            if isinstance(prompt, str):
+                _check_template_refs(prompt, known, at, errors)
+
+        elif ntype == "parallel":
+            reg_kids = _walk_semantics(node.get("steps") or [], dict(known), errors, f"{at}.steps")
+            known.update(reg_kids)
+            registered.update(reg_kids)
+
+        elif ntype == "conditional":
+            condition = node.get("condition")
+            if isinstance(condition, str):
+                for match in _PLACEHOLDER_RE.finditer(condition):
+                    root = match.group(1).partition(".")[0]
+                    if known.get(root) is None:
+                        _err(
+                            errors,
+                            at,
+                            f"unknown placeholder {{{match.group(1)}}} in condition",
+                        )
+                cond_err = _condition_ast_error(condition)
+                if cond_err:
+                    _err(errors, at, f"invalid condition: {cond_err}")
+            reg_then = _walk_semantics(node.get("then") or [], dict(known), errors, f"{at}.then")
+            reg_else = _walk_semantics(node.get("else") or [], dict(known), errors, f"{at}.else")
+            for branch_reg in (reg_then, reg_else):
+                known.update(branch_reg)
+                registered.update(branch_reg)
+
+        if (
+            isinstance(name, str)
+            and name.strip()
+            and ntype
+            in (
+                *_LEAF_TYPES,
+                "parallel",
+                "conditional",
+            )
+        ):
+            known[name] = ntype
+            registered[name] = ntype
+    return registered
 
 
 def _build_steps(spec_steps: list[Any], *, source_path: str | None = None) -> list[Any]:
