@@ -60,9 +60,71 @@ def {func_name}(ctx):
     console.print(f"[green]Created:[/green] {loop_file}")
 
 
+def _walk_spec_nodes(nodes: list, depth: int) -> None:
+    from loopmaster.core.types import Conditional, Parallel
+
+    pad = "  " * depth
+    for node in nodes:
+        if isinstance(node, Parallel):
+            console.print(f"{pad}• parallel ({len(node.steps)} steps)")
+            _walk_spec_nodes(node.steps, depth + 1)
+        elif isinstance(node, Conditional):
+            cond = node.condition if isinstance(node.condition, str) else "<expr>"
+            console.print(f"{pad}• conditional [{cond}]")
+            console.print(f"{pad}  then:")
+            _walk_spec_nodes(node.then_steps, depth + 2)
+            if node.else_steps:
+                console.print(f"{pad}  else:")
+                _walk_spec_nodes(node.else_steps, depth + 2)
+        else:
+            detail = node.model or node.tool or ""
+            line = f"{pad}• {node.name}"
+            if detail:
+                line += f" [{detail}]"
+            console.print(line)
+
+
+def _print_json_plan(loop_def, spec) -> None:
+    console.print(f"[green]Valid:[/green] {spec.name} v{spec.version} ({spec.execution})")
+    if spec.description:
+        console.print(f"  {spec.description}")
+    if spec.budget:
+        b = spec.budget
+        parts = [
+            f"max_cost=${b.max_cost}" if b.max_cost else None,
+            f"max_tokens={b.max_tokens}" if b.max_tokens else None,
+            f"max_steps={b.max_steps}" if b.max_steps else None,
+        ]
+        console.print("  budget: " + ", ".join(p for p in parts if p))
+    ep = spec.error_policy
+    if ep is not None:
+        fallback = f", fallback={ep.fallback_model}" if ep.fallback_model else ""
+        console.print(
+            f"  error_policy: retry={ep.retry}, on_failure={ep.on_failure.value}{fallback}"
+        )
+    console.print("[cyan]Steps:[/cyan]")
+    _walk_spec_nodes(spec.steps, 1)
+    console.print(f"[dim]source_hash: {loop_def.source_hash[:16]}…[/dim]")
+
+
+def _load_json_loop(loop_file: str):
+    import json as json_mod
+
+    from loopmaster.spec.loader import load_loop_from_json_file
+
+    try:
+        return load_loop_from_json_file(loop_file)
+    except FileNotFoundError:
+        console.print(f"[red]Error:[/red] Cannot read {loop_file}")
+        raise typer.Exit(1) from None
+    except json_mod.JSONDecodeError as e:
+        console.print(f"[red]Error:[/red] invalid JSON in {loop_file}: {e}")
+        raise typer.Exit(1) from None
+
+
 @app.command()
 def validate(
-    loop_file: str = typer.Argument(..., help="Path to loop Python file"),
+    loop_file: str = typer.Argument(..., help="Path to loop Python or JSON file"),
 ) -> None:
     """Validate a loop file without running it."""
     from loopmaster.core.engine import LoopEngine
@@ -71,6 +133,11 @@ def validate(
     engine = LoopEngine()
 
     try:
+        if loop_file.lower().endswith(".json"):
+            loop_def, spec = _load_json_loop(loop_file)
+            _print_json_plan(loop_def, spec)
+            return
+
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("_loop_module", loop_file)
@@ -107,7 +174,7 @@ def validate(
 
 @app.command()
 def run(
-    loop_file: str = typer.Argument(..., help="Path to loop Python file"),
+    loop_file: str = typer.Argument(..., help="Path to loop Python or JSON file"),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume from last checkpoint"),
     dry_run: bool = typer.Option(False, "--dry-run", "-d", help="Validate without LLM calls"),
 ) -> None:
@@ -117,6 +184,33 @@ def run(
     engine = LoopEngine()
 
     try:
+        if loop_file.lower().endswith(".json"):
+            loop_def, spec = _load_json_loop(loop_file)
+            if dry_run:
+                _print_json_plan(loop_def, spec)
+                return
+            engine.register(loop_def)
+            console.print(f"[cyan]Running:[/cyan] {loop_def.name} v{loop_def.version}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Executing loop...", total=None)
+                result = engine.run(loop_def, dict(spec.initial_context))
+                progress.update(task, completed=True, description="Done")
+            if result.success:
+                console.print("[green]Loop completed successfully[/green]")
+                console.print(f"  Cost: ${result.total_cost:.4f}")
+                console.print(f"  Tokens: {result.total_tokens}")
+                console.print(f"  Steps: {', '.join(result.steps_executed)}")
+            else:
+                console.print(f"[red]Loop failed:[/red] {result.error}")
+                if result.checkpoint_saved:
+                    console.print("[yellow]Checkpoint saved — use --resume to continue[/yellow]")
+                raise typer.Exit(1)
+            return
+
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("_loop_module", loop_file)
