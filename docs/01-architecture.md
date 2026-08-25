@@ -91,23 +91,31 @@ loopmaster/
 │   ├── claude_code.py     # ClaudeCodeAdapter
 │   └── cursor.py          # CursorAdapter
 ├── mcp/
-│   ├── __init__.py
-│   ├── transport.py       # MCP server (thin transport layer)
-│   └── loop_protocol.py   # Loop lifecycle protocol (discover, start, events, pause, resume)
+│   ├── __init__.py         # Legacy in-memory LoopJob protocol (pre-refactor)
+│   ├── runtime.py          # FastMCP instance, JobStore singleton, DetachedRunner
+│   ├── server.py           # Tool registration + stdio entrypoint
+│   ├── tools_loops.py      # loop_list/get/result/status/cancel/save/delete
+│   ├── tools_run.py        # loop_run (detached | agent), loop_record
+│   ├── tools_hitl.py       # loop_questions / loop_respond
+│   ├── tools_blocks.py     # block_add/get/list + code-ref validation
+│   ├── tools_notifications.py  # loop_inbox + pending_notifications marker
+│   ├── job_store.py        # JobStore composition root (WAL SQLite)
+│   ├── store_models.py     # Dataclasses, status sets, is_pid_alive, parse_duration
+│   ├── job_ops.py          # Jobs CRUD mixin (terminal guards, upsert)
+│   ├── loop_store.py       # Persisted LoopSpec v1 mixin
+│   ├── code_store.py       # Code blocks mixin (SHA-256 pinning)
+│   ├── message_store.py    # HITL questions/answers mixin
+│   ├── notification_store.py  # Notifications outbox mixin
+│   └── worker.py           # DetachedRunner: daemon threads, lease, heartbeat, cancel poll
 ├── events/
 │   ├── __init__.py
 │   ├── emitter.py         # EventEmitter (OTel + LoopEvent)
 │   └── models.py          # LoopEvent schema
 ├── cli/
 │   ├── __init__.py
-│   ├── app.py             # Typer CLI app
-│   ├── commands/
-│   │   ├── init.py
-│   │   ├── validate.py
-│   │   ├── run.py
-│   │   ├── templates.py
-│   │   └── docs.py
-│   └── progress.py        # Rich progress bars
+│   ├── app.py             # Typer CLI app (validate/run/export/init/templates/docs)
+│   ├── json_loop.py       # JSON LoopSpec plan printing + loading
+│   └── blocks.py          # block add/get/list sub-app
 ├── templates/
 │   ├── reflection.py
 │   ├── tool_use.py
@@ -142,17 +150,18 @@ The engine wraps the loop body in an executor. When the body calls `Step("name",
 - Dynamic control flow works because Python evaluates it at runtime
 - Checkpointing uses `executed_step_names` (not step_index) for branch-independent resume
 
-### 2. Python DSL as Source of Truth (NOT YAML)
+### 2. Python DSL as Source of Truth, JSON LoopSpec as Execution Format
 
-**Decision:** Loops are defined in Python using decorators and runtime calls. YAML is an export format only.
+**Decision:** Loops are defined in Python using decorators and runtime calls (authoring format). Since the JSON Loop Engine refactor (ADR-011), **JSON is also a first-class execution format**: a declarative `LoopSpec v1` (`schemas/loopspec-v1.schema.json`) can be validated, persisted in the database and executed without any Python. A compiler (`spec/compiler.py`, CLI `export --format json`) converts DSL loops into specs; YAML remains an export/inspection format only.
 
 **Rationale:**
 - YAML cannot express conditional branching without reinventing a template language
 - Python closures can't be pickled — checkpointing YAML+callbacks is impossible
 - Python is the native language of AI developers
 - FastAPI-style pattern: declarative API over imperative language
+- JSON specs enable DB-persisted loops, detached daemon-thread execution, code blocks from the store, HITL pauses and agent-mode walking — none expressible in YAML
 
-**ADR:** `docs/adr/001-python-dsl-not-yaml.md`
+**ADRs:** `docs/adr/001-python-dsl-not-yaml.md`, `docs/adr/011-json-config-as-execution-format.md`
 
 ### 2. Runtime Interpretation (NOT Code Generation)
 
