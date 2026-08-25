@@ -254,23 +254,37 @@ def templates_list() -> None:
 @app.command()
 def export(
     loop_file: str = typer.Argument(..., help="Path to loop Python file"),
-    output: str | None = typer.Option(None, "-o", "--output", help="Output YAML file path"),
+    output: str | None = typer.Option(None, "-o", "--output", help="Output file path"),
+    fmt: str = typer.Option("yaml", "--format", "-f", help="Export format: yaml or json"),
 ) -> None:
-    """Export a loop definition as YAML."""
+    """Export a loop definition as YAML or JSON (LoopSpec v1)."""
+    import json
+
     from loopmaster.core.yaml_export import export_loop
+    from loopmaster.spec.compiler import CompileError, compile_loop_spec
 
     try:
         loop_def = _load_python_loop(loop_file)
-        yaml_str = export_loop(loop_def)
+        if fmt.lower() == "json":
+            spec = compile_loop_spec(loop_def)
+            text = json.dumps(spec, indent=2, ensure_ascii=False) + "\n"
+        elif fmt.lower() == "yaml":
+            text = export_loop(loop_def)
+        else:
+            console.print(f"[red]Error:[/red] unknown format '{fmt}' (expected yaml or json)")
+            raise typer.Exit(1)
 
         if output:
-            Path(output).write_text(yaml_str, encoding="utf-8")
+            Path(output).write_text(text, encoding="utf-8")
             console.print(f"[green]Exported:[/green] {output}")
         else:
-            console.print(yaml_str)
+            console.print(text)
 
     except SystemExit:
         raise
+    except CompileError as e:
+        console.print(f"[red]Compile error:[/red] {e}")
+        raise typer.Exit(1) from e
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1) from e

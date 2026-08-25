@@ -22,7 +22,7 @@ from loopmaster.executors.shell import ShellExecutor
 logger = logging.getLogger("loopmaster.spec.loader")
 
 SPEC_VERSION = "1.0"
-_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _LEAF_TYPES = {"llm", "shell", "http", "mcp", "code", "human"}

@@ -432,6 +432,33 @@ from loopmaster.core.yaml_export import export_loop
 yaml_str = export_loop(loop_def)
 ```
 
+### JSON Loop Engine (LoopSpec v1)
+
+Loops can also be defined declaratively as JSON (`LoopSpec v1`, see `schemas/loopspec-v1.schema.json` and ADR-011). Python stays the authoring format; JSON is the execution format — both run on the same engine.
+
+Node types: `llm`, `shell`, `http`, `mcp`, `code` (DB-stored, SHA-256 pinned subprocess blocks), `human` (HITL questions with timeout policies), plus `parallel` and `conditional` blocks. Top-level keys: `context`, `budget`, `error_policy`, `notify`, `deny_capabilities`.
+
+```bash
+# Compile an existing Python loop to LoopSpec v1
+loop-engine export my_loop.py --format json -o my_loop.json
+
+# Validate / dry-run a JSON spec
+loop-engine validate my_loop.json
+loop-engine run my_loop.json --dry-run
+```
+
+Via MCP, agents store specs in SQLite and run them detached (the agent keeps working while the job executes):
+
+```
+loop_save(loop_name="my-loop", spec_json='{"loopmaster": "1.0", ...}')
+result = loop_run(spec_json=..., mode="detached")   # returns job_id immediately
+loop_status(job_id=...)                              # poll progress
+```
+
+Human-input steps pause as `waiting_input`; answer via `loop_respond(job_id, msg_id, answer)` or list open questions with `loop_questions()`. Lifecycle notifications land in the outbox — every tool response carries a `pending_notifications` marker, read them with `loop_inbox()`.
+
+Ready-made JSON examples compiled from the Python scenarios: `loops/scenario1_simple_pipeline.json`, `loops/scenario7_shell_pipeline.json`.
+
 ---
 
 ## Observability & Streaming

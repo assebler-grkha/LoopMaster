@@ -1,0 +1,26 @@
+{
+  "loopmaster": "1.0",
+  "name": "test_simple_pipeline",
+  "version": "1.0.0",
+  "execution": "engine",
+  "steps": [
+    {
+      "type": "llm",
+      "name": "greet",
+      "prompt": "Say hello in one sentence.",
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "type": "llm",
+      "name": "topic",
+      "prompt": "Name a random interesting topic in 5 words.",
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "type": "llm",
+      "name": "summary",
+      "prompt": "Combine these into a fun fact: {{greet}} about {{topic}}",
+      "model": "stealth/ox-alpha"
+    }
+  ]
+}

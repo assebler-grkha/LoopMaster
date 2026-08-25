@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .compiler import CompileError, compile_loop_file, compile_loop_spec
 from .loader import (
     LoopSpec,
     SpecValidationError,
@@ -12,8 +13,11 @@ from .loader import (
 )
 
 __all__ = [
+    "CompileError",
     "LoopSpec",
     "SpecValidationError",
+    "compile_loop_file",
+    "compile_loop_spec",
     "load_loop_from_dict",
     "load_loop_from_json_file",
     "parse_loop_spec",
