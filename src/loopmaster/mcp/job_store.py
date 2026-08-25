@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -329,22 +330,60 @@ class JobStore:
             cur.close()
             return deleted
 
+    def _host_pid_alive(self, metrics_json: str | None) -> bool:
+        """Check whether the job's owning host process is still alive."""
+        if not metrics_json:
+            return False
+        try:
+            pid = json.loads(metrics_json).get("host_pid")
+        except (json.JSONDecodeError, AttributeError):
+            return False
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        if sys.platform == "win32":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, 0, pid
+            )
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
     def mark_interrupted_jobs_on_startup(self) -> int:
-        """Mark orphan 'running' or 'in_progress' jobs as 'interrupted' on startup."""
+        """Mark orphan 'running'/'in_progress' jobs as 'interrupted' on startup.
+
+        Jobs whose recorded host_pid is still alive are skipped: duplicate MCP
+        server instances share this DB and must not kill each other's live jobs.
+        """
+        interrupted = 0
         with self._lock:
             now = time.time()
             cur = self.conn.cursor()
             cur.execute(
-                """
-                UPDATE jobs SET status = 'interrupted', updated_at = ?
-                WHERE status IN ('running', 'in_progress')
-                """,
-                (now,),
+                "SELECT job_id, metrics FROM jobs WHERE status IN ('running', 'in_progress')"
             )
-            count = cur.rowcount
+            rows = cur.fetchall()
+            for row in rows:
+                if self._host_pid_alive(row["metrics"]):
+                    continue
+                cur.execute(
+                    "UPDATE jobs SET status = 'interrupted', updated_at = ? WHERE job_id = ?",
+                    (now, row["job_id"]),
+                )
+                interrupted += cur.rowcount
             self.conn.commit()
             cur.close()
-            return count
+            return interrupted
 
     def close(self) -> None:
         """Close the SQLite connection."""
